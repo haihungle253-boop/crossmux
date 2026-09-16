@@ -1,0 +1,191 @@
+#include <gtest/gtest.h>
+
+#include <array>
+#include <string>
+#include <vector>
+
+#include "lib/AiCompanion/PromptBuilder.h"
+#include "lib/JsonParser/StreamingJsonParser.h"
+
+namespace {
+
+// Round-trips the built body through the same parser the firmware uses. Escaping
+// bugs are the likeliest defect in this class and the hardest to spot by eye, so
+// validity is asserted rather than inspected.
+bool parsesAsJson(const char* body, const size_t len) {
+  JsonCallbacks cb{};
+  cb.ctx = nullptr;
+  StreamingJsonParser parser(cb);
+  parser.feed(body, len);
+  return !parser.hasError();
+}
+
+bool contains(const char* haystack, const std::string& needle) {
+  return std::string(haystack).find(needle) != std::string::npos;
+}
+
+PromptBuilder::Position samplePosition() {
+  PromptBuilder::Position p;
+  p.bookTitle = "百年孤独";
+  p.author = "加西亚·马尔克斯";
+  p.chapterTitle = "第十二章";
+  p.percent = 43;
+  return p;
+}
+
+TEST(PromptBuilder, ProducesValidJsonWithRequiredFields) {
+  std::array<char, 4096> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setModel("test-model");
+  builder.setPersona("You are a companion.");
+  builder.setQuestion("What did you make of that chapter?");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "\"model\":\"test-model\""));
+  EXPECT_TRUE(contains(builder.body(), "\"stream\":true"));
+  EXPECT_TRUE(contains(builder.body(), "\"role\":\"system\""));
+  EXPECT_TRUE(contains(builder.body(), "\"role\":\"user\""));
+}
+
+// Book text routinely contains all of these. Any one of them unescaped makes
+// the request unparseable at the provider.
+TEST(PromptBuilder, EscapesQuotesBackslashesAndNewlines) {
+  std::array<char, 4096> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setExcerpt("She said \"stop\".\nHe wrote C:\\path\tand left.");
+  builder.setQuestion("Thoughts?");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "\\\"stop\\\""));
+  EXPECT_TRUE(contains(builder.body(), "\\\\path"));
+  EXPECT_TRUE(contains(builder.body(), "\\n"));
+  EXPECT_TRUE(contains(builder.body(), "\\t"));
+}
+
+TEST(PromptBuilder, EscapesControlCharacters) {
+  std::array<char, 2048> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  const char excerpt[] = {'a', 0x01, 'b', 0x1f, 'c', '\0'};
+  builder.setExcerpt(excerpt);
+  builder.setQuestion("q");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "\\u0001"));
+  EXPECT_TRUE(contains(builder.body(), "\\u001f"));
+}
+
+// The guard is what makes shared progress real; it must not depend on the
+// reader having written anything particular in their persona file.
+TEST(PromptBuilder, AlwaysEmitsProgressGuardWithPosition) {
+  std::array<char, 4096> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setPersona("Be blunt.");
+  builder.setPosition(samplePosition());
+  builder.setQuestion("q");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "Be blunt."));
+  EXPECT_TRUE(contains(builder.body(), "Never reveal, hint at, or speculate about anything beyond this point"));
+  EXPECT_TRUE(contains(builder.body(), "百年孤独"));
+  EXPECT_TRUE(contains(builder.body(), "第十二章"));
+  EXPECT_TRUE(contains(builder.body(), "Progress: 43%"));
+}
+
+TEST(PromptBuilder, FallsBackToADefaultPersona) {
+  std::array<char, 2048> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setPersona("");
+  builder.setQuestion("q");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(contains(builder.body(), "reading companion"));
+}
+
+// A cap landing inside a multi-byte character would put invalid UTF-8 on the
+// wire. Each of these characters is three bytes, so a 10-byte cap must yield 9.
+TEST(PromptBuilder, ExcerptCapTruncatesOnUtf8Boundary) {
+  std::array<char, 4096> buf{};
+  PromptBuilder::Limits limits;
+  limits.excerptBytes = 10;
+  PromptBuilder builder(buf.data(), buf.size(), limits);
+  builder.setExcerpt("一二三四五");  // 15 bytes
+  builder.setQuestion("q");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "一二三"));
+  EXPECT_FALSE(contains(builder.body(), "四"));
+}
+
+TEST(PromptBuilder, HistoryIsReplayedAsAlternatingTurns) {
+  std::array<char, 4096> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  const std::vector<PromptBuilder::Exchange> history = {
+      {"Who is he?", "A soldier."},
+      {"And her?", "His sister."},
+  };
+  builder.setHistory(history.data(), history.size());
+  builder.setQuestion("What now?");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "\"role\":\"assistant\""));
+  EXPECT_TRUE(contains(builder.body(), "A soldier."));
+  EXPECT_TRUE(contains(builder.body(), "His sister."));
+  EXPECT_EQ(builder.droppedExchanges(), 0u);
+}
+
+// When the window binds, the recent exchanges are the ones a follow-up depends
+// on, so the oldest must be the ones dropped.
+TEST(PromptBuilder, HistoryCapDropsOldestAndKeepsNewest) {
+  std::array<char, 8192> buf{};
+  PromptBuilder::Limits limits;
+  limits.historyBytes = 64;
+  PromptBuilder builder(buf.data(), buf.size(), limits);
+
+  const std::vector<PromptBuilder::Exchange> history = {
+      {"oldest question here", "oldest reply here"},
+      {"middle question here", "middle reply here"},
+      {"newest question here", "newest reply here"},
+  };
+  builder.setHistory(history.data(), history.size());
+  builder.setQuestion("next");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "newest reply here"));
+  EXPECT_FALSE(contains(builder.body(), "oldest reply here"));
+  EXPECT_GE(builder.droppedExchanges(), 1u);
+}
+
+// Failing closed matters: a half-written body would be sent and rejected, and
+// the error would point at the provider rather than at us.
+TEST(PromptBuilder, FailsClosedWhenOutputBufferIsTooSmall) {
+  std::array<char, 64> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setPersona("a persona long enough to overflow this tiny buffer");
+  builder.setExcerpt("and an excerpt too");
+  builder.setQuestion("and a question");
+
+  EXPECT_FALSE(builder.build());
+  EXPECT_EQ(builder.length(), 0u);
+  EXPECT_STREQ(builder.body(), "");
+}
+
+TEST(PromptBuilder, MaxTokensOmittedWhenUnset) {
+  std::array<char, 2048> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setQuestion("q");
+  ASSERT_TRUE(builder.build());
+  EXPECT_FALSE(contains(builder.body(), "max_tokens"));
+
+  builder.setMaxTokens(300);
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(contains(builder.body(), "\"max_tokens\":300"));
+}
+
+}  // namespace
