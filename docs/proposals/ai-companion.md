@@ -1,379 +1,554 @@
 # Proposal: AI Reading Companion
 
-> Status: **Draft for discussion** — not an accepted feature. Filed under
-> [SCOPE.md](../../SCOPE.md) ("Use CrossMux Issues to discuss a substantial
-> addition before investing in it"). Every resource figure below is an
-> **estimate** unless explicitly marked as measured.
+> Status: **Draft v2 — for discussion.** Not an accepted feature.
+> Filed under [SCOPE.md](../../SCOPE.md) ("Use CrossMux Issues to discuss a
+> substantial addition before investing in it"). Every resource figure is an
+> **estimate** unless marked as measured.
+>
+> **v2 reframes v1.** v1 designed a stateless lookup tool. This version designs
+> a *stateful co-reading companion*. See §2 for what changed and why.
 
 ## 1. Summary
 
-Add an opt-in, on-demand **AI reading companion**: a question-answering layer
-attached to the reader's existing word-selection pipeline, not a general chat
-application.
+An opt-in **reading companion**: a configurable persona that reads the same book
+at the same pace as the reader, remembers what the two of them have discussed,
+and talks about the book — not a lookup tool that answers isolated questions.
 
-The three claims that define the design:
+Three claims define the design:
 
-1. It reuses the dictionary selection machinery
-   ([`DictionaryWordSelectActivity`](../../src/activities/reader/DictionaryWordSelectActivity.h))
-   rather than inventing a new text-selection UI.
-2. It is **progress-aware and spoiler-guarded** — the model only ever receives
-   text the reader has already passed, and is told where the reader is.
-3. It treats the network as a scarce, explicit resource: requests are batched,
-   answers are cached to SD, and an **offline question queue** is a first-class
-   mode, not a fallback.
+1. **Progress-synced.** The companion only ever sees text the reader has already
+   passed. This is implemented by clipping context at the reader's position
+   (§9.1). It doubles as spoiler protection, but its real purpose is that the
+   two of them are genuinely reading the same book at the same point.
+2. **Stateful.** Persona and conversation history persist across sessions and
+   are replayed into every request. A companion that forgets yesterday is not a
+   companion.
+3. **Persona is data, not code.** The personality and the question set are
+   plain text files the reader edits directly on the SD card, with no rebuild
+   and no flash (§9.2). What the companion becomes is the reader's decision,
+   not the implementer's.
 
-Without (2) the feature is a chatbot that happens to run on an e-reader. With
-it, it is a companion.
+## 2. What changed from v1, and why
 
-## 2. Motivation
+v1 modelled the feature as an extension of dictionary lookup: select a word, get
+an answer, forget. That shape cannot express "read this book with me" — it has
+no memory, no voice of its own, and no continuity between sessions.
 
-CrossMux already ships an offline StarDict lookup
-([docs/dictionary.md](../dictionary.md)). It answers "what does this word mean"
-and nothing else. Three gaps remain that an offline dictionary structurally
-cannot close:
+| | v1 (tool) | v2 (companion) |
+|---|---|---|
+| Entry point | select a word | a conversation the reader can open at any time |
+| State | none; each request independent | persona + per-book conversation history |
+| Register | neutral, factual | configurable personality |
+| Context | current page | reading position + history + persona |
+| Typical prompt | "what does this word mean" | "how did that chapter land for you" |
 
-- **Sense disambiguation in context.** A dictionary returns all senses; it
-  cannot tell you which one this sentence uses, and it misses idioms, classical
-  Chinese usage, and proper nouns entirely. This is the single highest-value,
-  lowest-cost gap.
-- **Paragraph-level comprehension.** Non-native readers and readers of dense
-  non-fiction want "what is this page saying", which no per-word tool provides.
-- **Continuity across sessions.** An e-reader is picked up days apart. Nothing
-  in the firmware helps a reader re-enter a book they left two weeks ago.
+**The transport layer is unchanged.** SSE decoding, incremental JSON parsing,
+context clipping, buffer-then-paint, credential handling and the resource
+discipline all carry over verbatim. What changes is the layer above: persona,
+memory, and how a conversation is driven from four buttons.
 
-## 3. Non-goals
+Two v1 features are **deprioritised, not dropped**: dictionary fallback and
+range selection are useful, but they are tool behaviours and no longer lead.
+
+## 3. Motivation
+
+CrossMux ships an offline StarDict lookup ([docs/dictionary.md](../dictionary.md))
+that answers "what does this word mean". Three things it structurally cannot do:
+
+- **Discuss.** A reader who just finished a chapter may want to react to it, not
+  look anything up. Nothing in the firmware serves that.
+- **Remember.** Reading a novel takes weeks across many sessions. No feature
+  carries anything from one session to the next except a page number.
+- **Have a point of view.** Disagreement, preference and a recognisable voice
+  are what separate a companion from a reference work.
+
+## 4. Non-goals
 
 - A general-purpose chat assistant, or any always-on / background networking.
   [SCOPE.md](../../SCOPE.md) excludes "unbounded background networking" and
   "persistent workloads that prevent normal sleep".
 - On-device inference. No model runs on the ESP32.
-- Sending whole books anywhere. Context is hard-capped (§7.1).
-- Text-to-speech. The Waveshare 3.97 does have an ES8311 codec and NS4150B
-  amplifier driving 16 kHz mono PCM
-  ([waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md)), so
-  spoken answers are physically possible — but streaming TTS decode is a
-  separate project and is out of scope here.
+- Sending whole books anywhere. Context is hard-capped (§9.1).
+- **Voice interaction — deferred, not rejected.** The hardware supports it and
+  the path is proven; the integration cost and a product-character conflict put
+  it out of scope for this proposal. The evidence is recorded in §13 so the
+  decision can be revisited without repeating the research.
 
-## 4. Constraints that shape the design
+## 5. Constraints
 
 | Constraint | Source | Consequence |
 |---|---|---|
-| **No touch panel; four buttons** (Back/Left/Function/Right) plus the AXP2101 power key | [waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md) hardware contract; the `waveshare_epaper_397_hardware` block in [platformio.ini](../../platformio.ini) declares no touch controller, unlike `metalio_eink4_hardware` (CST816S) | Selecting text is expensive. The **primary path must require zero selection**; range selection is an enhancement, not the entry point. |
-| **ESP32-C3 baseline: ~380 KB RAM, no PSRAM** | [AGENTS.md](../../AGENTS.md) Golden Rule 1; [hardware-constraints.md](../engineering/hardware-constraints.md) | Gate the feature behind a capability flag, enabled on S3 + PSRAM targets first (§9). |
-| **E-ink refresh is 0.3–1 s** | [waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md) refresh/LUT section | **Never render per token.** Accumulate the full answer, then paint once (§7.2). |
-| **Connectivity is on-demand** | [SCOPE.md](../../SCOPE.md); the `startActivityForResultWith<WifiSelectionActivity>` pattern at [`OpdsBookBrowserActivity.cpp:629`](../../src/activities/browser/OpdsBookBrowserActivity.cpp) | Connect, ask, disconnect. Batch where possible (§7.3). |
-| **Existing TLS does not verify certificates** | `setInsecure()` at [`HttpDownloader.cpp:79`](../../src/network/HttpDownloader.cpp), [`WeReadHttpClient.cpp:247`](../../lib/WeReadWebApi/src/WeReadHttpClient.cpp), [`KOReaderSyncClient.cpp:84,120,152,262`](../../lib/KOReaderSync/KOReaderSyncClient.cpp) | Acceptable for public dictionary downloads; **not** acceptable for a request carrying a bearer credential (§8.1). |
+| **No touch panel; four buttons** (Back/Left/Function/Right) plus the AXP2101 power key | [waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md); the `waveshare_epaper_397_hardware` block in [platformio.ini](../../platformio.ini) declares no touch controller, unlike `metalio_eink4_hardware` (CST816S) | Free-text entry is impractical as the main path. Conversation must be drivable by a handful of fixed actions (§7.2). |
+| **ESP32-C3 baseline: ~380 KB RAM, no PSRAM** | [AGENTS.md](../../AGENTS.md) Golden Rule 1; [hardware-constraints.md](../engineering/hardware-constraints.md) | Gate behind a capability flag, S3 + PSRAM first (§11). Conversation history makes the context budget larger than v1's, which sharpens this. |
+| **E-ink refresh is 0.3–1 s** | [waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md) | Never render per token (§9.4). Also rules out a conversational rhythm faster than one exchange per pause. |
+| **Connectivity is on-demand** | [SCOPE.md](../../SCOPE.md); the `startActivityForResultWith<WifiSelectionActivity>` pattern at [`OpdsBookBrowserActivity.cpp:629`](../../src/activities/browser/OpdsBookBrowserActivity.cpp) | Conversation happens at reading pauses, not mid-page (§7.1). |
+| **Existing TLS does not verify certificates** | `setInsecure()` at [`HttpDownloader.cpp:79`](../../src/network/HttpDownloader.cpp), [`WeReadHttpClient.cpp:247`](../../lib/WeReadWebApi/src/WeReadHttpClient.cpp), [`KOReaderSyncClient.cpp:84,120,152,262`](../../lib/KOReaderSync/KOReaderSyncClient.cpp) | Unacceptable for a request carrying a bearer credential (§10.1). |
 
-## 5. Architecture
+## 6. Architecture
 
-### 5.1 Layering
+### 6.1 Layering
 
-Mirrors the split CrossMux already uses for WeRead — portable protocol logic in
-`lib/`, UI in `src/activities/` — so the protocol layer is unit-testable on the
-host, as `test/weread_webapi/` and `test/streaming_json_parser/` already are.
+Mirrors the split CrossMux already uses for WeRead — portable logic in `lib/`,
+UI in `src/activities/` — so the logic layer is host-testable, as
+`test/weread_webapi/` and `test/streaming_json_parser/` already are.
 
 ```
 lib/AiCompanion/                 host-testable, no HAL dependency
-  AiProvider.h                   provider abstraction (§7.4)
+  AiProvider.h                   provider abstraction (§9.6)
   AiHttpClient.{h,cpp}           POST + Server-Sent Events
   SseDecoder.{h,cpp}             frames "data: {...}\n\n" out of a byte stream
   AiChatParser.{h,cpp}           drives StreamingJsonParser; extracts delta content
-  PromptBuilder.{h,cpp}          context assembly + hard byte caps (§7.1)
-  AiNoteStore.{h,cpp}            per-book answer cache and note persistence
+  PersonaStore.{h,cpp}           loads and validates the persona file       [new in v2]
+  QuestionSet.{h,cpp}            loads the editable question list           [new in v2]
+  ConversationStore.{h,cpp}      per-book history: append, trim, replay     [new in v2]
+  PromptBuilder.{h,cpp}          persona + history + clipped excerpt + caps
+  AiNoteStore.{h,cpp}            saved exchanges as notes
 
-src/activities/reader/ai/
-  AiRangeSelectActivity          sentence/paragraph selection (§5.3)
-  AiAskActivity                  preset question list; custom entry via keyboard
-  AiAnswerActivity               paginated answer view
+src/activities/reader/companion/
+  CompanionChatActivity          the conversation surface (§7.2)
+  CompanionAnswerView            paginated reply rendering
+  CompanionSelectActivity        range selection, from M4
 
 src/activities/settings/
-  AiSettingsActivity             provider, endpoint, model, credential, disclaimer
+  CompanionSettingsActivity      endpoint, model, credential, disclaimer, toggles
 
 test/ai_companion/               gtest suite, registered in test/CMakeLists.txt
 ```
 
-### 5.2 Request flow
+### 6.2 Request flow
 
 ```
-  reader page
+  trigger: chapter end | reader menu | selected passage
       |
-      | (a) zero-selection: whole current Page
-      | (b) range selection: AiRangeSelectActivity
       v
-  PromptBuilder ---- reading position (spineIndex, visibleTextOffset)
-      |         \--- book title / author / chapter title
-      |         \--- spoiler-guard system instruction   (§7.1)
+  PromptBuilder
+      |-- persona.txt                         (resent every request, §9.2)
+      |-- last N exchanges from history        (§9.3)
+      |-- book excerpt clipped at reading position (§9.1)
+      |-- position facts: chapter title, percent
       v
-  AiHttpClient  --POST--> provider (or self-hosted proxy, §7.4)
+  AiHttpClient --POST--> provider (or self-hosted proxy, §9.6)
       |
-      | SSE byte chunks arrive via HttpDownloader::DataCallback
-      | (returning false aborts -> this is the Back-to-cancel implementation)
+      | SSE chunks arrive via HttpDownloader::DataCallback;
+      | returning false aborts -> this is Back-to-cancel
       v
   SseDecoder -> AiChatParser -> PSRAM accumulation buffer
       |
-      | complete (or paragraph boundary)
       v
-  AiAnswerActivity  -- single e-ink repaint --  [ optional: save as note ]
+  CompanionAnswerView   single repaint (§9.4)
+      |
+      +--> ConversationStore.append(question, reply)
+      +--> optionally AiNoteStore (§9.7)
 ```
 
-### 5.3 Reuse points
+### 6.3 Reuse points
 
-Three pieces of existing code do most of the work.
-
-**Selection.** `DictionaryWordSelectActivity` already extracts a
-`WordBox { x, y, width, row, text }` list from the laid-out `Page`'s
-`TextBlock`s, and repaints a cursor move differentially by restoring saved
-pixels under the old highlight instead of re-running the full two-pass page
-render (`SNAPSHOT_CAPACITY`, `DictionaryWordSelectActivity.h:77`). Extending
-`int selected` (`:58`) to a `selStart`/`selEnd` pair gives range selection with
-the same repaint strategy: Left/Right extend by word, Up/Down by line,
-Confirm asks, Back cancels.
+**Reading position.** `EpubReaderActivity` already maintains
+`(spineIndex, visibleTextOffset)` for KOReader progress sync
+([`EpubReaderActivity.cpp:975-991`](../../src/activities/reader/EpubReaderActivity.cpp)),
+backed by `Page::visibleTextOffset` ([`Page.h:90`](../../lib/Epub/Epub/Page.h)),
+and resolves a chapter title via `getStatsChapterTitle()` (`:165`). That is
+exactly the triple §9.1 needs. A chapter boundary is a change in `spineIndex`,
+so the M2 trigger needs no new bookkeeping either.
 
 **Streaming.** `HttpDownloader::DataCallback`
 ([`HttpDownloader.h:21`](../../src/network/HttpDownloader.h)) is a
-`bool(const uint8_t*, size_t)` invoked per body chunk, where returning `false`
-aborts the transfer. Paired with the existing SAX-style
+`bool(const uint8_t*, size_t)` called per body chunk, where returning `false`
+aborts the transfer. With the SAX-style
 [`StreamingJsonParser`](../../lib/JsonParser/StreamingJsonParser.h), an SSE
-response can be decoded with no whole-body buffering — and cancellation comes
-free.
+response decodes without whole-body buffering, and cancellation is free.
 
-`HttpDownloader` currently exposes GET only; this proposal adds a
-`postJson(url, headers, body, DataCallback)` overload alongside the existing
-`fetchUrl` family.
+`HttpDownloader` exposes GET only today; this proposal adds
+`postJson(url, headers, body, DataCallback)` beside the existing `fetchUrl`
+family.
 
-**Reading position.** `EpubReaderActivity` already carries the
-`(spineIndex, visibleTextOffset)` pair for KOReader progress sync
-([`EpubReaderActivity.cpp:975-991`](../../src/activities/reader/EpubReaderActivity.cpp)),
-backed by `Page::visibleTextOffset`
-([`Page.h:90`](../../lib/Epub/Epub/Page.h)), and resolves a chapter title via
-`getStatsChapterTitle()` (`:165`). That is exactly the triple the spoiler guard
-needs — no new bookkeeping.
+**Per-book file paths.** `BookmarkUtil::getBookmarkPath(bookPath)`
+([`BookmarkUtil.h`](../../src/util/BookmarkUtil.h)) already derives a per-book
+sidecar path from a book path, with directory creation hidden inside
+([`BookmarkFile.h`](../../src/util/BookmarkFile.h)). `ConversationStore` follows
+the same pattern rather than inventing a second scheme.
 
-### 5.4 Entry points
+**Text selection (M4).** `DictionaryWordSelectActivity` extracts
+`WordBox { x, y, width, row, text }` from the laid-out `Page` and repaints
+cursor moves differentially via a saved-pixel snapshot
+(`DictionaryWordSelectActivity.h:77`). Widening `int selected` (`:58`) to a
+`selStart`/`selEnd` pair yields range selection with the same repaint strategy.
 
-- **Reader menu.** One item beside the existing
-  `{MenuAction::DICTIONARY, StrId::STR_LOOKUP}`
+### 6.4 Files on the SD card
+
+The visible/hidden split matters and is not cosmetic. `/.crosspoint/` is a
+**hidden** directory (`BookmarkUtil.cpp:6`, `ReadingBackground.h:13`), whereas
+hand-managed content sits at a visible root — manually installed dictionaries
+use `/dictionaries/`, with `/.dictionaries/` reserved for manager-installed ones
+(`DictionaryRegistry.cpp:17`). Files the reader is expected to edit by hand must
+follow the visible convention, or they cannot be found on operating systems that
+hide dot-directories by default.
+
+| Path | Visible | Written by | Purpose |
+|---|---|---|---|
+| `/companion/persona.txt` | **yes** | the reader | personality, in any language (§9.2) |
+| `/companion/questions.txt` | **yes** | the reader | one preset question per line |
+| `/companion/README.txt` | **yes** | shipped | how to edit the two files above |
+| `/.crosspoint/companion/<book>/history.bin` | no | firmware | conversation history (§9.3) |
+| `/.crosspoint/companion/config.bin` | no | firmware | endpoint, model, credential (§10.2) |
+| `/.crosspoint/companion/disclaimer.accepted` | no | firmware | consent marker (§10.3) |
+
+A missing or empty `persona.txt` is not an error: the companion falls back to a
+built-in neutral persona and says so once.
+
+### 6.5 Entry points
+
+- **Chapter end** — the M2 trigger, and the primary one (§7.1).
+- **Reader menu** — one item beside `{MenuAction::DICTIONARY, StrId::STR_LOOKUP}`
   ([`EpubReaderMenuActivity.cpp:85`](../../src/activities/reader/EpubReaderMenuActivity.cpp)).
-- **Long-press Confirm.** `LONG_PRESS_MENU_FUNCTION`
+- **Long-press Confirm** — `LONG_PRESS_MENU_FUNCTION`
   ([`CrossPointSettings.h:205`](../../src/CrossPointSettings.h)) already offers
   `LP_MENU_DICTIONARY`. Append a new value at the **end** of the enum and of the
-  `SettingsList.h` array — the comment above the enum warns that inserting in
-  the middle silently reinterprets stored indices.
-- **Dictionary miss.** The `Popup::NotFound` branch in
-  `DictionaryWordSelectActivity::performLookup()` (`.cpp:220-222`) offers
-  "ask AI" instead of dead-ending (feature A2).
+  `SettingsList.h` array; the comment above the enum warns that inserting in the
+  middle silently reinterprets stored indices.
 
-## 6. Feature plan
+## 7. Interaction design
 
-### Tier A — minimum viable
+### 7.1 Conversation happens at pauses
 
-| ID | Feature | Behaviour | Why first |
-|---|---|---|---|
-| **A1** | **Ask about a selection** | Select sentence/paragraph → preset question list → paginated answer | The core interaction; three keypresses, no typing |
-| **A2** | **Dictionary fallback** | Local StarDict miss → ask the model, passing the **whole sentence** as context | Smallest diff (one existing branch), smallest response, and the one thing an offline dictionary structurally cannot do |
-| **A3** | **Explain this page** | Zero selection. Concatenate the current `Page`'s `TextBlock`s (~1–2 KB) → 2–3 sentence summary | Best possible UX on a four-button device: nothing to select |
+A round trip costs a Wi-Fi association plus generation — several seconds. That is
+acceptable at a chapter boundary, which is already a natural stop, and
+unacceptable between pages.
 
-Preset questions (no keyboard needed): *what does this mean* / *translate* /
-*what is this reference* / *what does this word refer to here*. Free-form
-questions route through the existing
-[`KeyboardEntryActivity`](../../src/activities/util/KeyboardEntryActivity.h),
-which is usable but slow with four buttons — hence presets first.
+So the companion is **invited, never interrupting**. It does not comment
+spontaneously, and there is no per-page mode.
 
-### Tier B — what makes it a companion
+### 7.2 Driving a conversation with four buttons
 
-| ID | Feature | Behaviour | Notes |
-|---|---|---|---|
-| **B1** | **Resume brief** | Reopening a book after *N* days shows a short "where you left off" card | Context is only chapter title + previous page + the reader's own highlights. The highest-value item in this proposal: it is the one feature that is *proactive* and bound to reading progress. |
-| **B2** | **Chapter recap + questions** | At a chapter boundary, optional recap plus two comprehension questions | Hooks the chapter transition / [`EndOfBookOptions`](../../src/activities/reader/EndOfBookOptions.h). Off by default. |
-| **B3** | **Who's who** | Select a name → "who is this?", answered **only** from text already read | Cached per book, so re-asking is free and offline. High value in long fiction. |
-| **B4** | **AI notes** | Any answer can be saved as a note anchored to the highlight | Store it in the shape KOReader uses (§7.5) so notes survive export and sync. |
+Free-text entry exists — [`KeyboardEntryActivity`](../../src/activities/util/KeyboardEntryActivity.h)
+— but four-button text entry is too slow to be the main path. Depth comes from
+fixed actions instead, in two groups:
+
+**Openers**, from the reader's own `questions.txt`, e.g.:
+
+```
+读完这一章，你有什么感受？
+这一段用了什么文学手法？
+你觉得这个角色现在在想什么？
+```
+
+**Continuations**, built in and always available after a reply:
+
+```
+[ 展开说说 ]   [ 换个角度 ]   [ 我不同意 ]   [ 那后来呢 ]   [ 自己输入 ]
+```
+
+Real conversation is mostly made of moves this generic — *go on*, *really?*,
+*I'm not sure I agree*. Four fixed continuations plus a persona are enough to
+reach genuine depth without typing.
+
+**`我不同意` ("I disagree") is the load-bearing one.** It is the control that
+turns a generated answer into an actual exchange, and it should be present from
+M3 rather than added later.
+
+### 7.3 Reply length
+
+A companion's replies are longer than a tool's. Length is governed from
+`persona.txt` (the shipped example asks for ~200 characters) rather than
+hardcoded, so the reader tunes it against their own patience and page size.
+`CompanionAnswerView` paginates whatever arrives.
+
+## 8. Feature plan
+
+### Tier A — the companion itself
+
+| ID | Feature | Notes |
+|---|---|---|
+| **A1** | **Configurable persona** | `persona.txt`, resent on every request (§9.2) |
+| **A2** | **Chapter-end conversation** | Zero selection; the first thing that feels like a companion |
+| **A3** | **Multi-turn memory** | Per-book history, last N exchanges replayed (§9.3) |
+| **A4** | **Continuation actions** | §7.2 |
+| **A5** | **Editable question set** | `questions.txt` |
+
+### Tier B — continuity and depth
+
+| ID | Feature | Notes |
+|---|---|---|
+| **B1** | **Discuss a passage** | Range selection (§6.3) → "what do you make of this" |
+| **B2** | **Resume brief** | Reopening after *N* days: where you left off and what you two last discussed. Distinct from v1's version because it can draw on conversation history, not just the text. |
+| **B3** | **Saved exchanges** | Persist an exchange as a note anchored to the position (§9.7) |
+| **B4** | **Marked passages** | Mark while reading with no radio; discuss them together later (§9.5) |
 
 ### Tier C — later
 
-- **Reading digest.** Weekly recap built from *saved highlights and notes*, not
-  book text — cheap. Surfaces through
-  [`reading-stats`](../../src/activities/apps/reading-stats/README.md) or a
-  standby face.
-- **Vocabulary review.** Spaced repetition over words captured via A2,
-  scheduling entirely local; the network is touched only to generate example
-  sentences. Compare KOReader's `vocabbuilder.koplugin`.
-- **Spoken answers.** See §3.
+- **Dictionary fallback.** Local StarDict miss → ask the model with the
+  surrounding sentence. Carried over from v1; still worthwhile, no longer lead.
+- **Reading digest.** Weekly recap from saved notes and exchanges, not book text.
+  Surfaces via [`reading-stats`](../../src/activities/apps/reading-stats/README.md).
+- **Per-book persona override.** Global persona is the v2 decision (§14); this is
+  the natural extension if it proves too coarse.
 
-## 7. Key design decisions
+## 9. Key design decisions
 
-### 7.1 Spoiler guard (non-negotiable)
+### 9.1 Progress-synced context
 
-Every request carries a system instruction stating the reader's position —
-*"the reader is in chapter N, X% through; use only the supplied text and do not
-reveal anything beyond this point"* — and the supplied text is **clipped at the
-current reading position**, using the `(spineIndex, visibleTextOffset)` pair
-from §5.3.
+Every request states the reader's position — chapter, percent — and the supplied
+excerpt is **clipped at the current reading position** using the
+`(spineIndex, visibleTextOffset)` pair from §6.3.
 
-A companion that spoils the ending when asked "who is this character" is worse
-than no companion. This is the feature's defining constraint, not a setting.
+This is what makes the claim "we are reading this together" true rather than
+decorative, and it is also the spoiler guard. A companion that answers "who is
+this character" by revealing the ending is worse than no companion. It is a
+property of the design, not a setting.
 
-Context is hard-capped by `PromptBuilder` at **4 KB** (2 KB on a constrained
-target). Whole books are never sent.
+Context is hard-capped by `PromptBuilder`. Whole books are never sent.
 
-### 7.2 Buffer, then paint once
+### 9.2 Persona is data, not code
 
-SSE is consumed incrementally so that Back can abort mid-generation, but
-rendering happens **once**, after the answer completes — or at most at paragraph
-boundaries. A static "thinking" indicator covers the wait, optionally with the
-existing `SoundFeedback` cue.
+`persona.txt` is free-form plain text in any language, written by the reader in
+any text editor, taking effect on the next request with no rebuild and no
+re-flash.
 
-Token-by-token repaint on a panel with a 0.3–1 s refresh is not a degraded
-experience; it is an unusable one.
+Rationale: the persona determines almost everything about how the feature feels,
+and the reader is better placed than the implementer to judge it. Iteration on
+it must not be gated on a development cycle.
 
-### 7.3 Offline question queue
+Shipped example (`/companion/README.txt` explains the file; the content below is
+illustrative, not enforced):
 
-Alongside the live mode, the reader can mark a question and **keep reading**
-with no radio activity. A later explicit *Sync companion* action brings Wi-Fi up
-once, sends the queued questions in a single session, writes the answers into
-the per-book note file, and disconnects.
+```
+你是我的读书搭子，我们正在一起读同一本书，进度完全同步。
 
-This matches the on-demand connectivity model in
-[SCOPE.md](../../SCOPE.md), removes per-question Wi-Fi wake cost, and is
-arguably the better reading experience — no network latency interrupts a page.
-It should be a peer of the live mode, not a degraded fallback.
+性格：博学但不端着，说话像朋友不像老师。
+      有自己的偏好和判断，可以不同意我。
 
-### 7.4 Provider abstraction
+规矩：不要复述剧情（我刚读完，我知道）。
+      说你注意到的细节、你的疑问、你的想法。
+      回答控制在 200 字以内。
+```
 
-Target the OpenAI-compatible `/chat/completions` shape. It is the de-facto
-interchange format, so one implementation reaches most hosted providers and
-local runtimes without per-vendor code. Provider-specific handling stays behind
-`AiProvider`.
+**The persona is resent in full on every request.** Personas drift when a model
+is left to remember its own instructions across a long conversation; resending
+costs tokens and removes the failure mode entirely.
 
-**A user-run proxy is the recommended configuration** (a home server, a NAS, a
-small edge worker). It is better on three axes at once:
+### 9.3 Conversation memory
 
-- The real provider credential never lands on the SD card.
-- Heavy work (long context, retrieval, future TTS) moves off the MCU.
-- Certificate handling collapses to a single pinned endpoint (§8.1).
+- **Scope: per book.** Reading two books means two independent relationships.
+  Path derivation follows `BookmarkUtil` (§6.3).
+- **Window: the last 8–10 exchanges**, oldest dropped first.
+- **No summarisation in v2.** Compacting older history into a running summary
+  preserves more, but costs an extra request per compaction and adds a failure
+  mode; revisit once the window proves too short in practice.
 
-Direct-to-provider stays supported for users who accept the trade-off.
-
-### 7.5 Note format compatibility
-
-CrossMux already syncs progress with KOReader ([`lib/KOReaderSync`](../../lib/KOReaderSync)).
-AI notes should reuse the field set KOReader's annotations already carry —
-`datetime`, `text`, `note`, `note_format`, `chapter`, `pageno`, `pos0`, `pos1`
-(`frontend/apps/reader/modules/readerannotation.lua:66`) — so notes can be
-exported to Markdown and read by existing KOReader tooling. Aligning field names
-costs nothing now and is expensive to retrofit later.
-
-Any new binary sidecar must follow the versioned-header convention in
-[file-formats.md](../file-formats.md) and bump its format version before any
+History is appended after a reply completes, so an aborted or failed request
+leaves no partial state. The file follows the versioned-header convention in
+[file-formats.md](../file-formats.md), and its version must be bumped before any
 layout change ([AGENTS.md](../../AGENTS.md) Golden Rule 10).
 
-## 8. Security and privacy
+### 9.4 Buffer, then paint once
 
-### 8.1 Certificate verification is required here
+SSE is consumed incrementally so Back can abort mid-generation, but rendering
+happens **once**, when the reply completes — or at most at paragraph boundaries.
+A static indicator covers the wait, optionally with the existing `SoundFeedback`
+cue.
 
-The existing `setInsecure()` calls (§4) skip server certificate and hostname
-validation. For fetching a public dictionary that is a tolerable trade-off. For
-a request carrying an API credential it is not: any party able to intercept the
-connection on the local network obtains a key with real billing attached.
+Token-by-token repaint on a 0.3–1 s panel is not a degraded experience; it is an
+unusable one.
 
-Two options, in order of preference:
+### 9.5 Marking without the radio
 
-1. **Self-hosted proxy with a pinned certificate** (§7.4). One trust anchor,
+The reader can mark a passage to discuss and **keep reading** with no network
+activity. A later explicit action raises Wi-Fi once, works through the marked
+passages in a single session, and disconnects.
+
+This matches the on-demand model in [SCOPE.md](../../SCOPE.md), removes per-item
+Wi-Fi wake cost, and keeps reading uninterrupted. It is a peer of the live mode,
+not a fallback.
+
+### 9.6 Provider abstraction
+
+Target the OpenAI-compatible `/chat/completions` shape — the de-facto
+interchange format, so one implementation reaches most hosted providers and
+local runtimes. Provider specifics stay behind `AiProvider`.
+
+**A user-run proxy is the recommended configuration** (home server, NAS, small
+edge worker). It is better on three axes simultaneously: the provider credential
+never lands on the SD card; heavy work moves off the MCU; and certificate
+handling collapses to a single pinned endpoint (§10.1). Direct-to-provider
+remains supported.
+
+### 9.7 Saved exchanges use KOReader's note shape
+
+CrossMux already syncs progress with KOReader ([`lib/KOReaderSync`](../../lib/KOReaderSync)).
+Saved exchanges should reuse the fields KOReader annotations already carry —
+`datetime`, `text`, `note`, `note_format`, `chapter`, `pageno`, `pos0`, `pos1`
+(`frontend/apps/reader/modules/readerannotation.lua:66`) — so they export to
+Markdown and are readable by existing KOReader tooling. Free now, expensive to
+retrofit.
+
+## 10. Security and privacy
+
+### 10.1 Certificate verification is required here
+
+The existing `setInsecure()` calls (§5) skip certificate and hostname
+validation. Tolerable for fetching a public dictionary; not for a request
+carrying an API credential, where anyone able to intercept the connection
+obtains a key with real billing attached.
+
+In order of preference:
+
+1. **Self-hosted proxy with a pinned certificate** (§9.6) — one trust anchor,
    and the provider credential never reaches the device.
 2. **Bundle the root CA** for the configured endpoint and verify properly.
 
-This must be resolved before the feature ships, not after.
+Resolved before shipping, not after.
 
-### 8.2 Credential storage
+### 10.2 Credential storage
 
-Reuse the existing device-bound obfuscation envelope already used for WeRead
-session data (`session.bin`, [file-formats.md](../file-formats.md), §"WeRead").
-This is obfuscation, not encryption — the threat model is casual SD-card
-inspection, and the documentation must say so plainly.
+Reuse the device-bound obfuscation envelope already used for WeRead session data
+(`session.bin`, [file-formats.md](../file-formats.md)). This is obfuscation, not
+encryption — the threat model is casual SD-card inspection, and the
+documentation must say so plainly.
 
-### 8.3 Informed consent
+### 10.3 Informed consent
 
-Book text leaves the device. Follow the WeRead precedent: a first-run disclaimer
-with a persisted acceptance marker (`disclaimer.accepted`), stating which
-endpoint receives data and what is sent. The feature is **off by default** and
-inert until configured.
+Book text and conversation history leave the device. Follow the WeRead
+precedent: a first-run disclaimer with a persisted acceptance marker, naming the
+endpoint and what is sent. The feature is **off by default** and inert until
+configured.
 
-## 9. Resource budget
+Conversation history is personal in a way a page number is not. The reader must
+be able to delete a book's history, and deleting the book must offer to delete
+it too.
 
-Answering the four questions in [SCOPE.md](../../SCOPE.md)'s acceptance test.
+## 11. Resource budget
+
+Answering [SCOPE.md](../../SCOPE.md)'s acceptance test.
 **All figures are estimates pending measurement on hardware.**
 
-**1. User benefit** — §2.
+**1. User benefit** — §3.
 
 **2. Resource cost** (estimated):
 
 | Item | Estimate |
 |---|---|
-| Context buffer | 4 KB (2 KB on a constrained target) |
-| Answer accumulation buffer | 8 KB |
+| Persona | ≤ 1 KB, capped on load |
+| Conversation window (8–10 exchanges) | ≤ 4 KB |
+| Book excerpt | ≤ 3 KB |
+| **Assembled request context** | **≤ 8 KB**, hard cap (v1: 4 KB — the increase is history and persona) |
+| Reply accumulation buffer | 8 KB |
 | SSE line buffer + parser state | ~2 KB |
 | TLS record buffers | 20–40 KB; ~8 KB if the server negotiates a smaller max fragment length |
-| **Peak additional RAM** | **~35–55 KB**, allocated in PSRAM on S3 targets |
+| **Peak additional RAM** | **~45–65 KB**, in PSRAM on S3 targets |
 | Largest single block | the TLS record buffer |
-| Flash | 40–60 KB for the new lib and activities |
-| Steady state | **zero** — nothing is retained outside the activity; everything allocated in `onEnter()` is released in `onExit()` ([AGENTS.md](../../AGENTS.md) Golden Rule 9) |
-| Persistent storage | per-book answer cache and notes, bounded, user-clearable |
+| Flash | 50–70 KB for the new lib and activities |
+| Steady state | **zero** — nothing retained outside the activity; everything allocated in `onEnter()` is released in `onExit()` ([AGENTS.md](../../AGENTS.md) Golden Rule 9) |
+| Persistent storage | per-book history, bounded by the window; user-clearable |
 
-**3. Power and lifetime** — Wi-Fi is raised only for an explicit request and
-dropped immediately after; the queue mode (§7.3) amortises one connection across
-many questions. No task outlives the activity. Idle sleep is unaffected because
-nothing runs in the background.
+**3. Power and lifetime** — Wi-Fi is raised only for an invited exchange and
+dropped immediately after; §9.5 amortises one association across many marked
+passages. No task outlives the activity, and nothing runs in the background, so
+idle sleep is unaffected.
 
-**4. Maintenance** — No new third-party dependency: HTTP, TLS, and JSON parsing
-all exist in-tree. New failure modes are network timeout, provider error
-response, malformed SSE, and credential rejection; each needs a distinct,
-translated message (`tr()`, Golden Rule 3).
+**4. Maintenance** — No new third-party dependency: HTTP, TLS and JSON parsing
+all exist in-tree. New failure modes are network timeout, provider error,
+malformed SSE, credential rejection, and malformed or oversized persona /
+question files; each needs a distinct translated message (`tr()`, Golden Rule 3).
 
 **Baseline gating.** Ship behind a capability flag enabled on S3 + PSRAM targets
 first. TLS itself is already proven on the C3 (`KOReaderSync` performs TLS
-requests there today), so the constraint is buffer headroom rather than TLS
-feasibility; a C3 build would need the reduced caps noted above and its own
-measurement pass.
+requests there today), so the constraint is buffer headroom, not TLS
+feasibility. A C3 build would need a reduced context cap and its own measurement
+pass; §14 asks whether it is worth supporting at all.
 
-## 10. Milestones
+## 12. Milestones
 
 | # | Deliverable | Verification |
 |---|---|---|
-| **M0** | `lib/AiCompanion/` protocol layer: SSE decode, incremental JSON, prompt assembly, byte caps | `test/ai_companion/` gtest suite, modelled on `test/streaming_json_parser/` |
-| **M1** | `HttpDownloader::postJson()`; one real request end-to-end in the desktop simulator | `pio run -e simulator -t run_simulator` (the host build verifies certificates through the system trust store) |
-| **M2** | **A2** dictionary fallback | Device: lookup miss path, heap before/after |
-| **M3** | **A3** page summary, then **A1** range selection | Device: refresh behaviour, cancellation, `ESP.getFreeHeap()` / `getMaxAllocHeap()` across 20 requests |
-| **M4** | **B1** resume brief, **B4** notes with KOReader-compatible fields | Device + export round-trip |
+| **M0** | `lib/AiCompanion/` transport: SSE decode, incremental JSON, prompt assembly, byte caps | `test/ai_companion/` gtest suite, modelled on `test/streaming_json_parser/` |
+| **M1** | `HttpDownloader::postJson()`; one real exchange end-to-end in the desktop simulator | `pio run -e simulator -t run_simulator` (the host build verifies certificates through the system trust store) |
+| **M2** | **A1 + A2** — persona loading and chapter-end conversation | Device: first exchange that reads as a companion; heap before/after |
+| **M3** | **A3 + A4** — history and continuation actions | Device: a multi-turn conversation surviving a power cycle |
+| **M4** | **A5 + B1** — editable questions, passage discussion | Device: selection, refresh behaviour, cancellation, heap across 20 exchanges |
+| **M5** | **B2 + B3** — resume brief, saved exchanges with KOReader fields | Device + export round-trip |
 
-M0 and M1 are entirely host-side. Nothing needs to be flashed until M2.
+M0 and M1 are entirely host-side; nothing is flashed before M2.
 
-## 11. Open questions
+**M2 is the first milestone that delivers the actual product.** It is chosen as
+the MVP because a chapter boundary needs no text selection, is already a reading
+pause so latency is tolerable, and requires persona, position and context to all
+be correct at once — a genuine end-to-end test of the idea.
 
-1. Should the C3 be supported at all in v1, or explicitly deferred?
-2. Preset question list: fixed in firmware, or user-editable from SD?
-3. Does the answer cache belong in the existing per-book cache directory
-   (and therefore participate in cache invalidation and format versioning), or
-   in a separate namespace that survives a cache clear?
-4. Is the self-hosted proxy the *documented default*, with direct-to-provider
+## 13. Deferred: voice interaction
+
+Recorded so the decision can be revisited without repeating the research.
+
+**The hardware supports it.** In the Waveshare `ESP32-S3-ePaper-3.97` repository,
+`ESP-IDF/02_Mic_test/components/codec_board/board_cfg.txt` defines this board as:
+
+```
+Board: S3_ePaper_3_97
+i2s: {bclk: 14, ws: 47, dout: 48, din: 21, mclk: 13}
+in_out: {codec: ES8311, pa: 39, use_mclk: 1, pa_gain:6}
+```
+
+Every pin matches the contract in
+[waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md) **except
+`din: 21`**, the I²S input line, which CrossMux does not use. The board has a
+microphone through the ES8311's ADC, and `ESP-IDF/02_Mic_test` records from it at
+16 kHz. Waveshare also ships a prebuilt voice-assistant firmware for this exact
+board at `Firmware/xiaozhi/ESP32-S3_e-Paper-3.97_xiaozhi.bin`, so voice AI on
+this hardware is demonstrated, not hypothetical.
+
+**Why it is still deferred.**
+
+1. CrossMux has no audio input path at all — `lib/hal/` contains only
+   `HalAudioOutput.{h,cpp}`. Capture, encode and upload would be built from
+   nothing.
+2. The shipped voice firmware is a dedicated appliance, not a reader. Hosting a
+   voice pipeline inside the reader means two subsystems contending for RAM and
+   CPU.
+3. **Product character conflict.** Voice interaction wants low latency, an open
+   microphone and a live connection. This device is built around a 0.3–1 s panel,
+   on-demand networking and multi-day battery life. This is a conflict of
+   character, not of feasibility, and it is the reason to wait.
+4. Continuous capture plus a held connection removes the battery life that is the
+   device's main advantage.
+
+**If revisited**, three options, cheapest first: use a phone as the microphone
+through the existing web server surface; keep text only; or build the capture
+path natively. Flashing the shipped `xiaozhi` firmware is a zero-development way
+to evaluate the experience first — it replaces CrossMux, so back up the SD card
+and confirm the restore path beforehand.
+
+## 14. Open questions
+
+1. Should the C3 be supported in v1, or explicitly deferred?
+2. Is a **global** persona (the v2 decision) too coarse in practice, or does a
+   per-book override earn its complexity?
+3. Is a **window of 8–10 exchanges** with oldest-dropped enough, or does
+   summarisation become necessary sooner than expected?
+4. Should conversation history live in the per-book cache directory — and so
+   participate in cache invalidation — or in a namespace that survives a cache
+   clear? Losing a month of conversation to a cache clear would be bad.
+5. Is the self-hosted proxy the *documented default*, with direct-to-provider
    marked advanced?
 
-## 12. References
+## 15. References
 
 **CrossMux**
-- [SCOPE.md](../../SCOPE.md) — acceptance test this proposal answers in §9
+- [SCOPE.md](../../SCOPE.md) — acceptance test answered in §11
 - [AGENTS.md](../../AGENTS.md) — golden rules 1, 2, 3, 9, 10
 - [hardware-constraints.md](../engineering/hardware-constraints.md) — the resource protocol
 - [waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md) — target hardware contract
-- [dictionary.md](../dictionary.md) — the lookup flow this feature extends
+- [dictionary.md](../dictionary.md) — the lookup flow Tier C extends
 - [file-formats.md](../file-formats.md) — sidecar conventions, WeRead credential envelope
 
-**KOReader** (referenced as prior art, not as code to port)
+**Waveshare `ESP32-S3-ePaper-3.97`** (vendor repository, cited in §13)
+- `ESP-IDF/02_Mic_test/` — microphone capture example and board pin table
+- `Firmware/xiaozhi/` — prebuilt voice-assistant firmware for this board
+
+**KOReader** (prior art, not code to port)
 - `frontend/apps/reader/modules/readerhighlight.lua:159-215` — the highlight
-  dialog's pluggable button table (`Wikipedia` / `Dictionary` / `Translate`),
-  and `addToHighlightDialog()` at `:1519`. The model for adding one more verb to
-  a selection without disturbing the others.
+  dialog's pluggable button table, and `addToHighlightDialog()` at `:1519`.
 - `frontend/apps/reader/modules/readerannotation.lua:66` — the annotation record
-  adopted in §7.5.
+  adopted in §9.7.
 - `frontend/ui/trapper.lua:341,500` — cancellable network operations behind a
-  dismissable progress widget; the same contract §7.2 implements via
-  `DataCallback` returning `false`.
+  dismissable widget; the same contract §9.4 implements via `DataCallback`
+  returning `false`.
 - `plugins/vocabbuilder.koplugin/` — spaced-repetition prior art for Tier C.
