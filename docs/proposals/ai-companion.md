@@ -196,6 +196,11 @@ hide dot-directories by default.
 A missing or empty `persona.txt` is not an error: the companion falls back to a
 built-in neutral persona and says so once.
 
+Starter copies of the three visible files are kept in
+[`assets/companion/`](../../assets/companion) and are covered by the
+`ShippedAssets` tests, so an edit that pushes the persona past its cap or leaves
+a stray encoding in it fails in CI rather than on a reader's device.
+
 ### 6.5 Entry points
 
 - **Chapter end** — the M2 trigger, and the primary one (§7.1).
@@ -469,7 +474,8 @@ pass; §14 asks whether it is worth supporting at all.
 |---|---|---|
 | **M0** | `lib/AiCompanion/` transport: SSE decode, incremental JSON, prompt assembly, byte caps | `test/ai_companion/` gtest suite, modelled on `test/streaming_json_parser/` |
 | **M1** | `HttpDownloader::postJson()`; one real exchange end-to-end in the desktop simulator | `pio run -e simulator -t run_simulator` (the host build verifies certificates through the system trust store) |
-| **M2** | **A1 + A2** — persona loading and chapter-end conversation | Device: first exchange that reads as a companion; heap before/after |
+| **M2a** | Companion data layer: persona, question set and per-book history, all taking buffers so file I/O stays at the device edge | Host: parsing, caps, eviction, save/load round-trip, and the shipped `assets/companion/` files |
+| **M2b** | **A1 + A2** — SD loading and the chapter-end conversation activity | Device: first exchange that reads as a companion; heap before/after |
 | **M3** | **A3 + A4** — history and continuation actions | Device: a multi-turn conversation surviving a power cycle |
 | **M4** | **A5 + B1** — editable questions, passage discussion | Device: selection, refresh behaviour, cancellation, heap across 20 exchanges |
 | **M5** | **B2 + B3** — resume brief, saved exchanges with KOReader fields | Device + export round-trip |

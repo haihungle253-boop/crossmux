@@ -4,7 +4,11 @@ add_executable(AiCompanionTest
   PromptBuilderTest.cpp
   StreamPipelineTest.cpp
   AiChatClientTest.cpp
+  CompanionDataTest.cpp
   ${REPO_ROOT}/lib/AiCompanion/AiChatClient.cpp
+  ${REPO_ROOT}/lib/AiCompanion/PersonaStore.cpp
+  ${REPO_ROOT}/lib/AiCompanion/QuestionSet.cpp
+  ${REPO_ROOT}/lib/AiCompanion/ConversationStore.cpp
   ${REPO_ROOT}/lib/AiCompanion/SseDecoder.cpp
   ${REPO_ROOT}/lib/AiCompanion/AiChatParser.cpp
   ${REPO_ROOT}/lib/AiCompanion/PromptBuilder.cpp
@@ -21,6 +25,10 @@ target_include_directories(AiCompanionTest PRIVATE
 target_link_libraries(AiCompanionTest PRIVATE
   crosspoint_test_common
   GTest::gtest_main
+)
+
+target_compile_definitions(AiCompanionTest PRIVATE
+  COMPANION_ASSET_DIR="${REPO_ROOT}/assets/companion"
 )
 
 gtest_discover_tests(AiCompanionTest)
