@@ -82,7 +82,7 @@ that answers "what does this word mean". Three things it structurally cannot do:
 | **ESP32-C3 baseline: ~380 KB RAM, no PSRAM** | [AGENTS.md](../../AGENTS.md) Golden Rule 1; [hardware-constraints.md](../engineering/hardware-constraints.md) | Gate behind a capability flag, S3 + PSRAM first (§11). Conversation history makes the context budget larger than v1's, which sharpens this. |
 | **E-ink refresh is 0.3–1 s** | [waveshare-epaper-397.md](../engineering/waveshare-epaper-397.md) | Never render per token (§9.4). Also rules out a conversational rhythm faster than one exchange per pause. |
 | **Connectivity is on-demand** | [SCOPE.md](../../SCOPE.md); the `startActivityForResultWith<WifiSelectionActivity>` pattern at [`OpdsBookBrowserActivity.cpp:629`](../../src/activities/browser/OpdsBookBrowserActivity.cpp) | Conversation happens at reading pauses, not mid-page (§7.1). |
-| **Existing TLS does not verify certificates** | `setInsecure()` at [`HttpDownloader.cpp:79`](../../src/network/HttpDownloader.cpp), [`WeReadHttpClient.cpp:247`](../../lib/WeReadWebApi/src/WeReadHttpClient.cpp), [`KOReaderSyncClient.cpp:84,120,152,262`](../../lib/KOReaderSync/KOReaderSyncClient.cpp) | Unacceptable for a request carrying a bearer credential (§10.1). |
+| **The TLS backend this board uses does not verify certificates** | [`HttpDownloader.cpp`](../../src/network/HttpDownloader.cpp) has two backends. `runGetWolf` calls `setInsecure()` (`:79`); `runGet` attaches `esp_crt_bundle_attach` (`:154`) and cannot perform an unverified handshake at all. `base` in [platformio.ini](../../platformio.ini) sets `-DFREEINK_NET_WOLFSSL=1`, and `waveshare_epaper_397_hardware` inherits it through `sound_feedback_hardware`, so this target takes the wolfSSL path. Also unverified: [`WeReadHttpClient.cpp:247`](../../lib/WeReadWebApi/src/WeReadHttpClient.cpp), [`KOReaderSyncClient.cpp:84,120,152,262`](../../lib/KOReaderSync/KOReaderSyncClient.cpp) | Unacceptable for a request carrying a bearer credential (§10.1). |
 
 ## 6. Architecture
 
@@ -385,10 +385,17 @@ retrofit.
 
 ### 10.1 Certificate verification is required here
 
-The existing `setInsecure()` calls (§5) skip certificate and hostname
+On this target the wolfSSL backend (§5) skips certificate and hostname
 validation. Tolerable for fetching a public dictionary; not for a request
 carrying an API credential, where anyone able to intercept the connection
 obtains a key with real billing attached.
+
+The scope of the work is narrower than it first appears, and the precedent is
+already in the tree: the sibling `runGet` backend verifies against the bundled
+CA roots through `esp_crt_bundle_attach`, with a comment recording that the
+build disables `CONFIG_ESP_TLS_INSECURE` so an unverified handshake cannot be
+established there at all. The task is to give the wolfSSL path an equivalent
+trust anchor, not to invent verification from nothing.
 
 In order of preference:
 

@@ -3,6 +3,8 @@ add_executable(AiCompanionTest
   AiChatParserTest.cpp
   PromptBuilderTest.cpp
   StreamPipelineTest.cpp
+  AiChatClientTest.cpp
+  ${REPO_ROOT}/lib/AiCompanion/AiChatClient.cpp
   ${REPO_ROOT}/lib/AiCompanion/SseDecoder.cpp
   ${REPO_ROOT}/lib/AiCompanion/AiChatParser.cpp
   ${REPO_ROOT}/lib/AiCompanion/PromptBuilder.cpp
