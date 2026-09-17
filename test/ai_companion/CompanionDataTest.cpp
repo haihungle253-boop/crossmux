@@ -1,6 +1,8 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cstdio>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -8,9 +10,6 @@
 #include "lib/AiCompanion/PersonaStore.h"
 #include "lib/AiCompanion/QuestionSet.h"
 #include "lib/JsonParser/StreamingJsonParser.h"
-
-#include <cstdio>
-#include <cstring>
 
 namespace {
 

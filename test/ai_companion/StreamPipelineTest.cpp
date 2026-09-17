@@ -13,8 +13,7 @@
 namespace {
 
 struct Pipeline {
-  explicit Pipeline(char* buf, const size_t cap)
-      : parser(buf, cap), decoder(this, &Pipeline::event, &Pipeline::done) {}
+  explicit Pipeline(char* buf, const size_t cap) : parser(buf, cap), decoder(this, &Pipeline::event, &Pipeline::done) {}
 
   static void event(void* ctx, const char* data, const size_t len) {
     static_cast<Pipeline*>(ctx)->parser.feedEvent(data, len);
