@@ -42,6 +42,28 @@ class HttpDownloader {
                        const std::string& password = "");
 
   /**
+   * POST a JSON body and stream the response through onData as it arrives.
+   *
+   * Written for streaming chat completions, where the response is an
+   * open-ended Server-Sent Events stream rather than a sized body: onData
+   * returning false tears the transfer down at the next chunk, which is how a
+   * caller stops at the provider's terminal sentinel instead of waiting for
+   * the server to close, and how a user cancels mid-generation.
+   *
+   * bearerToken, when non-empty, is sent as `Authorization: Bearer`. Redirects
+   * are deliberately not followed: an API endpoint that answers a POST with a
+   * 3xx is misconfigured, and replaying a credential to whatever host it names
+   * is not a thing to do automatically.
+   *
+   * Returns true only for a 2xx whose body was delivered in full or stopped by
+   * onData. `outStatus`, when given, always receives the HTTP status (0 if the
+   * request never got that far) so a caller can tell 401 from a dropped
+   * connection.
+   */
+  static bool postJson(const std::string& url, const std::string& body, const DataCallback& onData,
+                       const std::string& bearerToken = "", int* outStatus = nullptr);
+
+  /**
    * Download a file to the SD card with optional credentials.
    */
   static DownloadError downloadToFile(const std::string& url, const std::string& destPath,

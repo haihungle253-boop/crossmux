@@ -243,15 +243,19 @@ HttpDownloader::DownloadError runGet(const std::string& url, const std::string& 
 // speaks TLS 1.3 and reads large bodies from servers where the esp_http_client/
 // mbedTLS path fails to connect or stalls mid-stream. Plain-http URLs still use a
 // WiFiClient inside runGetWolf, so this is safe for non-TLS targets too.
+bool buildUserAgent(char (&out)[USER_AGENT_CAPACITY]) {
+  const int length = snprintf(out, USER_AGENT_CAPACITY, "CrossMux-%s-" CROSSPOINT_VERSION, HalSystem::getDeviceModel());
+  if (length < 0 || static_cast<size_t>(length) >= USER_AGENT_CAPACITY) {
+    LOG_ERR("HTTP", "User-Agent exceeds %zu bytes", USER_AGENT_CAPACITY);
+    return false;
+  }
+  return true;
+}
+
 HttpDownloader::DownloadError runGetSecure(const std::string& url, const std::string& username,
                                            const std::string& password, Sink& sink) {
   char userAgent[USER_AGENT_CAPACITY];
-  const int userAgentLength =
-      snprintf(userAgent, sizeof(userAgent), "CrossMux-%s-" CROSSPOINT_VERSION, HalSystem::getDeviceModel());
-  if (userAgentLength < 0 || static_cast<size_t>(userAgentLength) >= sizeof(userAgent)) {
-    LOG_ERR("HTTP", "User-Agent exceeds %zu bytes", sizeof(userAgent));
-    return HttpDownloader::HTTP_ERROR;
-  }
+  if (!buildUserAgent(userAgent)) return HttpDownloader::HTTP_ERROR;
 #if defined(FREEINK_NET_WOLFSSL)
   return runGetWolf(url, username, password, userAgent, sink);
 #else
@@ -323,4 +327,134 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   }
   LOG_DBG("HTTP", "Downloaded %zu bytes", sink.downloaded);
   return OK;
+}
+
+bool HttpDownloader::postJson(const std::string& url, const std::string& body, const DataCallback& onData,
+                              const std::string& bearerToken, int* outStatus) {
+  if (outStatus) *outStatus = 0;
+  if (!onData) {
+    LOG_ERR("HTTP", "postJson requires a data callback");
+    return false;
+  }
+
+  char userAgent[USER_AGENT_CAPACITY];
+  if (!buildUserAgent(userAgent)) return false;
+
+  WifiPowerSaveGuard psGuard;
+
+#if defined(FREEINK_NET_WOLFSSL)
+  freeink::SecureHttpClient http;
+  http.setTimeout(HTTP_TIMEOUT_MS);
+  // TODO(ai-companion): this request carries a bearer credential, so it must
+  // verify the peer before shipping. SecureHttpClient::setCACert() takes a PEM
+  // root; see docs/proposals/ai-companion.md section 10.1.
+  http.setInsecure();
+  if (!http.begin(url)) {
+    LOG_ERR("HTTP", "postJson bad URL");
+    return false;
+  }
+  http.setUserAgent(userAgent);
+  http.addHeader("Content-Type", "application/json");
+  http.addHeader("Accept", "text/event-stream");
+  if (!bearerToken.empty()) http.addHeader("Authorization", "Bearer " + bearerToken);
+  // A redirect on an authenticated POST would replay the credential to whatever
+  // host the response names; make the caller deal with a 3xx instead.
+  http.setFollowRedirects(0);
+
+  bool stoppedByCallback = false;
+  const int status = http.sendRequest("POST", reinterpret_cast<const uint8_t*>(body.data()), body.size(),
+                                      [&http, &onData, &stoppedByCallback](const uint8_t* data, const size_t len) {
+                                        // Only a success body is the event stream the caller is parsing. An
+                                        // error body is usually plain JSON, not SSE, so feeding it to an SSE
+                                        // decoder would yield nothing; the status code carries that news.
+                                        if (http.getStatus() < 200 || http.getStatus() > 299) return true;
+                                        if (onData(data, len)) return true;
+                                        stoppedByCallback = true;
+                                        return false;
+                                      });
+
+  if (outStatus) *outStatus = status;
+  if (status < 0) {
+    LOG_ERR("HTTP", "postJson transport failure");
+    return false;
+  }
+  if (status < 200 || status > 299) {
+    LOG_ERR("HTTP", "postJson status %d", status);
+    return false;
+  }
+  // A caller-initiated stop is the normal ending here: the stream is read until
+  // the provider's sentinel, not until the socket closes.
+  return stoppedByCallback || http.responseComplete();
+#else
+  esp_http_client_config_t config = {};
+  config.url = url.c_str();
+  config.method = HTTP_METHOD_POST;
+  config.buffer_size = HTTP_RX_BUF;
+  config.buffer_size_tx = HTTP_TX_BUF;
+  config.timeout_ms = HTTP_TIMEOUT_MS;
+  config.crt_bundle_attach = esp_crt_bundle_attach;
+
+  esp_http_client_handle_t client = esp_http_client_init(&config);
+  if (!client) {
+    LOG_ERR("HTTP", "postJson client init failed");
+    return false;
+  }
+
+  esp_http_client_set_header(client, "User-Agent", userAgent);
+  esp_http_client_set_header(client, "Content-Type", "application/json");
+  esp_http_client_set_header(client, "Accept", "text/event-stream");
+  std::string authorization;
+  if (!bearerToken.empty()) {
+    authorization = "Bearer " + bearerToken;
+    esp_http_client_set_header(client, "Authorization", authorization.c_str());
+  }
+
+  esp_err_t err = esp_http_client_open(client, static_cast<int>(body.size()));
+  if (err != ESP_OK) {
+    LOG_ERR("HTTP", "postJson open failed: %s", esp_err_to_name(err));
+    esp_http_client_cleanup(client);
+    return false;
+  }
+
+  size_t written = 0;
+  while (written < body.size()) {
+    const int n = esp_http_client_write(client, body.data() + written, static_cast<int>(body.size() - written));
+    if (n <= 0) {
+      LOG_ERR("HTTP", "postJson short write at %zu/%zu", written, body.size());
+      esp_http_client_cleanup(client);
+      return false;
+    }
+    written += static_cast<size_t>(n);
+  }
+
+  esp_http_client_fetch_headers(client);
+  const int status = esp_http_client_get_status_code(client);
+  if (outStatus) *outStatus = status;
+  if (status < 200 || status > 299) {
+    LOG_ERR("HTTP", "postJson status %d", status);
+    esp_http_client_cleanup(client);
+    return false;
+  }
+
+  auto buf = makeUniqueNoThrow<char[]>(READ_CHUNK);
+  if (!buf) {
+    LOG_ERR("HTTP", "OOM: %u byte read buffer", (unsigned)READ_CHUNK);
+    esp_http_client_cleanup(client);
+    return false;
+  }
+
+  while (true) {
+    const int read = esp_http_client_read(client, buf.get(), READ_CHUNK);
+    if (read < 0) {
+      LOG_ERR("HTTP", "postJson read failed");
+      esp_http_client_cleanup(client);
+      return false;
+    }
+    if (read == 0) break;  // stream finished
+    if (!onData(reinterpret_cast<const uint8_t*>(buf.get()), static_cast<size_t>(read))) break;
+  }
+
+  esp_http_client_cleanup(client);
+  return true;
+#endif
 }
