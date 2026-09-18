@@ -7,6 +7,7 @@
 #include <WiFi.h>
 
 #include <array>
+#include <cstring>
 #include <utility>
 
 #include "AiChatClient.h"
@@ -324,17 +325,33 @@ void CompanionChatActivity::runExchange(const std::string& question) {
   }
 
   const std::string reply(client.reply(), client.replyLength());
-  if (!delivered && !client.complete()) {
-    // Two independent ways of hearing that the reply finished: the provider's
-    // [DONE] sentinel, and the transport reaching the end of the response. Only
-    // when neither says so has the connection actually dropped part-way. Both
-    // are needed -- not every OpenAI-compatible endpoint sends the sentinel, and
-    // demanding it would mark perfectly good replies as broken.
-    //
+
+  // Three ways a reply can stop before the model was finished, and all three
+  // have to be asked, because on real hardware each one fires alone:
+  //
+  //   transport  the connection dropped part-way. Two independent signals are
+  //              needed -- the provider's [DONE] sentinel and the transport
+  //              reaching the end -- because not every OpenAI-compatible
+  //              endpoint sends the sentinel, and demanding it would mark
+  //              perfectly good replies as broken.
+  //   buffer     the reply outgrew REPLY_BYTES. The parser has always recorded
+  //              this; nothing used to ask.
+  //   provider   the model hit its own token ceiling. Note that a provider may
+  //              cut the text and still report "stop" -- observed in the field
+  //              against an OpenAI-compatible proxy -- so this is the weakest
+  //              of the three and cannot be relied on alone.
+  const bool transportCutIt = !delivered && !client.complete();
+  const bool bufferCutIt = client.replyTruncated();
+  const char* const finish = client.finishReason();
+  const bool providerCutIt = finish != nullptr && std::strcmp(finish, "length") == 0;
+
+  if (transportCutIt || bufferCutIt || providerCutIt) {
     // Show what came, because half an answer still reads, but do not record it:
     // history is replayed into every later request, and a truncated assistant
     // turn in it is a standing instruction to break off mid-sentence.
-    LOG_ERR(LOG_TAG, "reply cut short at %u bytes; not recorded", static_cast<unsigned>(client.replyLength()));
+    LOG_ERR(LOG_TAG, "reply cut short at %u bytes (transport=%d buffer=%d provider=%d finish=%s); not recorded",
+            static_cast<unsigned>(client.replyLength()), transportCutIt, bufferCutIt, providerCutIt,
+            finish != nullptr && finish[0] != '\0' ? finish : "-");
     showAnswer(question, reply + "\n\n" + tr(STR_COMPANION_CUT_SHORT));
     return;
   }

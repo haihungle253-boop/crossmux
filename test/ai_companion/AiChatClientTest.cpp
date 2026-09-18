@@ -99,6 +99,45 @@ TEST(AiChatClient, BeginResetsBetweenExchanges) {
   EXPECT_STREQ(client.reply(), "第二次");
 }
 
+// The three signals the activity consults before deciding a reply is whole.
+// They were all built; until a reply actually came back cut short on the
+// device, nothing asked them anything.
+
+TEST(AiChatClient, ReportsTruncationWhenTheReplyOutgrowsItsBuffer) {
+  std::array<char, 32> buf{};
+  AiChatClient client(buf.data(), buf.size());
+  client.begin();
+  drive(client, chunk(std::string(200, 'x')) + "data: [DONE]\n\n", 64);
+  client.end();
+
+  EXPECT_TRUE(client.replyTruncated());
+  EXPECT_LT(client.replyLength(), 200u);
+}
+
+TEST(AiChatClient, ReportsNoTruncationWhenTheReplyFits) {
+  std::array<char, 512> buf{};
+  AiChatClient client(buf.data(), buf.size());
+  client.begin();
+  drive(client, chunk("刚好装得下") + "data: [DONE]\n\n", 64);
+  client.end();
+
+  EXPECT_FALSE(client.replyTruncated());
+}
+
+TEST(AiChatClient, ReportsTheProvidersFinishReason) {
+  const std::string capped =
+      R"(data: {"choices":[{"index":0,"delta":{},"finish_reason":"length"}]})"
+      "\n\ndata: [DONE]\n\n";
+
+  std::array<char, 512> buf{};
+  AiChatClient client(buf.data(), buf.size());
+  client.begin();
+  drive(client, chunk("说到一半") + capped, 64);
+  client.end();
+
+  EXPECT_STREQ(client.finishReason(), "length");
+}
+
 TEST(AiChatClient, IsIndependentOfTransportChunkSize) {
   const std::string stream = chunk("稳") + chunk("定") + chunk("的") + "data: [DONE]\n\n";
   for (size_t size = 1; size <= 40; ++size) {
