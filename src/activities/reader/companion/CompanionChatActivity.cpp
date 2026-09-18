@@ -431,11 +431,24 @@ void CompanionChatActivity::drawQuestionList(const int contentX, const int conte
                                  ? firstVisible + static_cast<size_t>(visibleRows)
                                  : list.size();
 
+  // The vertical window above has always been careful; the horizontal one was
+  // missing entirely. A question from the reader's own questions.txt has no
+  // length limit, so a long one ran off the right edge -- on the rotated panel
+  // that is not merely invisible, it is hundreds of out-of-range writes per
+  // frame, and the row simply ends mid-character.
+  const int textX = x + SELECTION_GUTTER;
+  const int maxTextWidth = contentX + contentWidth - metrics.contentSidePadding - textX;
+
   for (size_t i = firstVisible; i < lastVisible; ++i) {
     const bool isSelected = static_cast<int>(i) == selected;
+    const auto style = isSelected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR;
     if (isSelected) renderer.drawText(UI_12_FONT_ID, x, y, ">", true, EpdFontFamily::BOLD);
-    renderer.drawText(UI_12_FONT_ID, x + SELECTION_GUTTER, y, list[i].c_str(), true,
-                      isSelected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
+    if (maxTextWidth > 0) {
+      // Measured in the style it is about to be drawn in: bold is wider, so
+      // fitting the regular form would let the selected row overflow again.
+      const std::string fitted = renderer.truncatedText(UI_12_FONT_ID, list[i].c_str(), maxTextWidth, style);
+      renderer.drawText(UI_12_FONT_ID, textX, y, fitted.c_str(), true, style);
+    }
     y += rowHeight;
   }
 
