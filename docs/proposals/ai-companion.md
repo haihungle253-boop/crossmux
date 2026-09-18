@@ -93,26 +93,29 @@ UI in `src/activities/` — so the logic layer is host-testable, as
 `test/weread_webapi/` and `test/streaming_json_parser/` already are.
 
 ```
-lib/AiCompanion/                 host-testable, no HAL dependency
-  AiProvider.h                   provider abstraction (§9.6)
-  AiHttpClient.{h,cpp}           POST + Server-Sent Events
+lib/AiCompanion/                 host-testable, no HAL dependency        [built]
   SseDecoder.{h,cpp}             frames "data: {...}\n\n" out of a byte stream
   AiChatParser.{h,cpp}           drives StreamingJsonParser; extracts delta content
-  PersonaStore.{h,cpp}           loads and validates the persona file       [new in v2]
-  QuestionSet.{h,cpp}            loads the editable question list           [new in v2]
-  ConversationStore.{h,cpp}      per-book history: append, trim, replay     [new in v2]
+  AiChatClient.{h,cpp}           one exchange: response bytes in, reply out
+  PersonaStore.{h,cpp}           loads and validates the persona file
+  QuestionSet.{h,cpp}            loads the editable question list
+  ConversationStore.{h,cpp}      per-book history: append, trim, replay
   PromptBuilder.{h,cpp}          persona + history + clipped excerpt + caps
-  AiNoteStore.{h,cpp}            saved exchanges as notes
+  AiNoteStore.{h,cpp}            saved exchanges as notes                 [planned, B3]
+
+src/network/HttpDownloader                                                [built]
+  postJson()                     streaming JSON POST, on both TLS backends
 
 src/activities/reader/companion/
-  CompanionChatActivity          the conversation surface (§7.2)
-  CompanionAnswerView            paginated reply rendering
-  CompanionSelectActivity        range selection, from M4
+  CompanionFiles.{h,cpp}         SD paths, reads and atomic writes         [built]
+  CompanionChatActivity          the conversation surface (§7.2)          [planned, M2b]
+  CompanionAnswerView            paginated reply rendering                [planned, M2b]
+  CompanionSelectActivity        range selection                          [planned, M4]
 
 src/activities/settings/
-  CompanionSettingsActivity      endpoint, model, credential, disclaimer, toggles
+  CompanionSettingsActivity      endpoint, model, credential, disclaimer  [planned, M2b]
 
-test/ai_companion/               gtest suite, registered in test/CMakeLists.txt
+test/ai_companion/               gtest suite, registered in test/CMakeLists.txt  [built]
 ```
 
 ### 6.2 Request flow
@@ -369,7 +372,15 @@ not a fallback.
 
 Target the OpenAI-compatible `/chat/completions` shape — the de-facto
 interchange format, so one implementation reaches most hosted providers and
-local runtimes. Provider specifics stay behind `AiProvider`.
+local runtimes.
+
+v2 proposed an `AiProvider` abstraction and a dedicated `AiHttpClient`. Neither
+was built, and both look like the wrong shape now: the endpoint, model and
+credential are configuration rather than code, and the device already has an
+HTTP client, so the transport became one `postJson()` on `HttpDownloader`
+instead of a parallel stack. `AiChatClient` holds only the exchange, with the
+transport injected. A second provider shape, if one is ever needed, is a reason
+to add the abstraction then — not now.
 
 **A user-run proxy is the recommended configuration** (home server, NAS, small
 edge worker). It is better on three axes simultaneously: the provider credential
@@ -475,7 +486,8 @@ pass; §14 asks whether it is worth supporting at all.
 | **M0** | `lib/AiCompanion/` transport: SSE decode, incremental JSON, prompt assembly, byte caps | `test/ai_companion/` gtest suite, modelled on `test/streaming_json_parser/` |
 | **M1** | `HttpDownloader::postJson()`; one real exchange end-to-end in the desktop simulator | `pio run -e simulator -t run_simulator` (the host build verifies certificates through the system trust store) |
 | **M2a** | Companion data layer: persona, question set and per-book history, all taking buffers so file I/O stays at the device edge | Host: parsing, caps, eviction, save/load round-trip, and the shipped `assets/companion/` files |
-| **M2b** | **A1 + A2** — SD loading and the chapter-end conversation activity | Device: first exchange that reads as a companion; heap before/after |
+| **M2b-1** | `HttpDownloader::postJson()` and `CompanionFiles` — the device edge | CI: first compile of `lib/AiCompanion` into firmware |
+| **M2b-2** | **A1 + A2** — the chapter-end conversation activity | Device: first exchange that reads as a companion; heap before/after |
 | **M3** | **A3 + A4** — history and continuation actions | Device: a multi-turn conversation surviving a power cycle |
 | **M4** | **A5 + B1** — editable questions, passage discussion | Device: selection, refresh behaviour, cancellation, heap across 20 exchanges |
 | **M5** | **B2 + B3** — resume brief, saved exchanges with KOReader fields | Device + export round-trip |
