@@ -54,14 +54,20 @@ class CompanionChatActivity final : public Activity {
   bool preventAutoSleep() override { return state == State::Thinking; }
 
  private:
-  enum class State : uint8_t { PickQuestion, WifiSelection, Thinking, ShowingAnswer, Error };
+  enum class State : uint8_t { PickQuestion, FollowUp, WifiSelection, Thinking, ShowingAnswer, TypingQuestion, Error };
 
   // Request and reply buffers, allocated only for the duration of an exchange.
   static constexpr size_t REQUEST_BYTES = 8192;
   static constexpr size_t REPLY_BYTES = 8192;
 
   void buildQuestionList();
+  void buildFollowUpList();
+  // The list the selection is currently moving over: openers before the first
+  // reply, continuations after it.
+  const std::vector<std::string>& activeList() const;
   void startAsk();
+  void activateSelection();
+  void launchKeyboard();
   void launchWifiSelection();
   void runExchange(const std::string& question);
   void showAnswer(const std::string& question, const std::string& reply);
@@ -80,6 +86,7 @@ class CompanionChatActivity final : public Activity {
   CompanionConfig config;
 
   std::vector<std::string> questions;
+  std::vector<std::string> followUps;
   int selected = 0;
 
   State state = State::PickQuestion;

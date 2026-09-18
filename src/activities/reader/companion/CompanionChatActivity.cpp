@@ -13,6 +13,7 @@
 #include "PromptBuilder.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/DictionaryDefinitionActivity.h"
+#include "activities/util/KeyboardEntryActivity.h"
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
@@ -44,6 +45,7 @@ void CompanionChatActivity::onEnter() {
   CompanionFiles::loadQuestions(*questionSet);
   CompanionFiles::loadHistory(context.bookPath, *history);
   buildQuestionList();
+  buildFollowUpList();
 
   if (!CompanionFiles::loadConfig(config)) {
     errorMessage = StrId::STR_COMPANION_NOT_SET_UP;
@@ -62,6 +64,8 @@ void CompanionChatActivity::onExit() {
   history.reset();
   questions.clear();
   questions.shrink_to_fit();
+  followUps.clear();
+  followUps.shrink_to_fit();
 }
 
 void CompanionChatActivity::buildQuestionList() {
@@ -80,14 +84,85 @@ void CompanionChatActivity::buildQuestionList() {
   questions.emplace_back(tr(STR_COMPANION_Q_CHARACTER));
 }
 
+// Continuations are the same four moves a real conversation is mostly made of:
+// go on, try another angle, I'm not sure I agree, and what happened next. Four
+// buttons cannot carry typing, but they carry these, and that is enough to push
+// an exchange somewhere worth going. The disagree option is the one that turns a
+// generated answer into an actual conversation, so it is not optional.
+void CompanionChatActivity::buildFollowUpList() {
+  followUps.clear();
+  followUps.reserve(5);
+  followUps.emplace_back(tr(STR_COMPANION_MORE));
+  followUps.emplace_back(tr(STR_COMPANION_ANGLE));
+  followUps.emplace_back(tr(STR_COMPANION_DISAGREE));
+  followUps.emplace_back(tr(STR_COMPANION_AND_THEN));
+  // Always last, and always present: four fixed moves cover most of a
+  // conversation, not all of it.
+  followUps.emplace_back(tr(STR_COMPANION_TYPE_OWN));
+}
+
+const std::vector<std::string>& CompanionChatActivity::activeList() const {
+  return state == State::FollowUp ? followUps : questions;
+}
+
+void CompanionChatActivity::activateSelection() {
+  const auto& list = activeList();
+  if (list.empty()) return;
+  const size_t index = static_cast<size_t>(selected);
+  // The typing option is the last continuation; everything else is sent as-is.
+  if (state == State::FollowUp && index + 1 == list.size()) {
+    launchKeyboard();
+    return;
+  }
+  startAsk();
+}
+
+void CompanionChatActivity::launchKeyboard() {
+  state = State::TypingQuestion;
+  requestUpdate();
+
+  if (!startActivityForResultWith<KeyboardEntryActivity>(
+          [this](const ActivityResult& result) {
+            if (result.isCancelled) {
+              state = State::FollowUp;
+              requestUpdate();
+              return;
+            }
+            const std::string typed = std::get<KeyboardResult>(result.data).text;
+            if (typed.empty()) {
+              state = State::FollowUp;
+              requestUpdate();
+              return;
+            }
+            if (WiFi.status() != WL_CONNECTED) {
+              failWith(StrId::STR_COMPANION_UNREACHABLE);
+              return;
+            }
+            runExchange(typed);
+          },
+          std::string(tr(STR_COMPANION_YOUR_QUESTION)), std::string(), size_t{240}, InputType::Text)) {
+    failWith(StrId::STR_COMPANION_UNREACHABLE);
+  }
+}
+
 void CompanionChatActivity::loop() {
   // A child activity owns the screen and the input in these states.
-  if (state == State::WifiSelection || state == State::ShowingAnswer) return;
+  if (state == State::WifiSelection || state == State::ShowingAnswer || state == State::TypingQuestion) {
+    return;
+  }
 
   if (state == State::Thinking) return;  // transient: the exchange runs inline
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Back)) {
-    finish();
+    // Back steps out one level: continuations return to the openers, and only
+    // from there does it leave the conversation.
+    if (state == State::FollowUp) {
+      state = State::PickQuestion;
+      selected = 0;
+      requestUpdate();
+    } else {
+      finish();
+    }
     return;
   }
 
@@ -96,19 +171,20 @@ void CompanionChatActivity::loop() {
     return;
   }
 
-  if (questions.empty()) return;
+  const int itemCount = static_cast<int>(activeList().size());
+  if (itemCount == 0) return;
 
   if (mappedInput.wasReleased(MappedInputManager::Button::Confirm)) {
-    startAsk();
+    activateSelection();
     return;
   }
 
-  buttonNavigator.onNext([this] {
-    selected = ButtonNavigator::nextIndex(selected, static_cast<int>(questions.size()));
+  buttonNavigator.onNext([this, itemCount] {
+    selected = ButtonNavigator::nextIndex(selected, itemCount);
     requestUpdate();
   });
-  buttonNavigator.onPrevious([this] {
-    selected = ButtonNavigator::previousIndex(selected, static_cast<int>(questions.size()));
+  buttonNavigator.onPrevious([this, itemCount] {
+    selected = ButtonNavigator::previousIndex(selected, itemCount);
     requestUpdate();
   });
 }
@@ -118,11 +194,11 @@ void CompanionChatActivity::startAsk() {
     launchWifiSelection();
     return;
   }
-  runExchange(questions[static_cast<size_t>(selected)]);
+  runExchange(activeList()[static_cast<size_t>(selected)]);
 }
 
 void CompanionChatActivity::launchWifiSelection() {
-  const std::string question = questions[static_cast<size_t>(selected)];
+  const std::string question = activeList()[static_cast<size_t>(selected)];
   state = State::WifiSelection;
   requestUpdate();
 
@@ -220,7 +296,11 @@ void CompanionChatActivity::showAnswer(const std::string& question, const std::s
   state = State::ShowingAnswer;
   if (!startActivityForResultWith<DictionaryDefinitionActivity>(
           [this](const ActivityResult&) {
-            state = State::PickQuestion;
+            // The conversation continues from here rather than resetting to the
+            // openers: having just read a reply, the useful next move is a
+            // follow-up.
+            state = State::FollowUp;
+            selected = 0;
             requestUpdate();
           },
           question, reply, false)) {
@@ -240,10 +320,11 @@ void CompanionChatActivity::drawQuestionList(const int contentX, const int conte
   const int x = contentX + metrics.contentSidePadding;
   int y = contentY + metrics.topPadding + metrics.headerHeight;
 
-  for (size_t i = 0; i < questions.size(); ++i) {
+  const auto& list = activeList();
+  for (size_t i = 0; i < list.size(); ++i) {
     const bool isSelected = static_cast<int>(i) == selected;
     if (isSelected) renderer.drawText(UI_12_FONT_ID, x, y, ">", true, EpdFontFamily::BOLD);
-    renderer.drawText(UI_12_FONT_ID, x + SELECTION_GUTTER, y, questions[i].c_str(), true,
+    renderer.drawText(UI_12_FONT_ID, x + SELECTION_GUTTER, y, list[i].c_str(), true,
                       isSelected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
     y += lineHeight + metrics.verticalSpacing;
   }
@@ -276,7 +357,9 @@ void CompanionChatActivity::drawCentered(const StrId message, const int contentX
 
 void CompanionChatActivity::render(RenderLock&&) {
   // A child activity paints its own screen in these states.
-  if (state == State::WifiSelection || state == State::ShowingAnswer) return;
+  if (state == State::WifiSelection || state == State::ShowingAnswer || state == State::TypingQuestion) {
+    return;
+  }
 
   renderer.clearScreen();
 
@@ -295,6 +378,7 @@ void CompanionChatActivity::render(RenderLock&&) {
 
   switch (state) {
     case State::PickQuestion:
+    case State::FollowUp:
       drawQuestionList(contentX, contentWidth, contentY);
       break;
     case State::Thinking:
@@ -307,9 +391,9 @@ void CompanionChatActivity::render(RenderLock&&) {
       break;
   }
 
-  const auto labels = state == State::PickQuestion
-                          ? mappedInput.mapLabels(tr(STR_BACK), tr(STR_COMPANION_ASK), "^", "v")
-                          : mappedInput.mapLabels(tr(STR_BACK), "", "", "");
+  const bool listVisible = state == State::PickQuestion || state == State::FollowUp;
+  const auto labels = listVisible ? mappedInput.mapLabels(tr(STR_BACK), tr(STR_COMPANION_ASK), "^", "v")
+                                  : mappedInput.mapLabels(tr(STR_BACK), "", "", "");
   GUI.drawButtonHints(renderer, labels.btn1, labels.btn2, labels.btn3, labels.btn4);
   renderer.displayBuffer();
 }

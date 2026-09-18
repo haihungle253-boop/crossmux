@@ -108,12 +108,21 @@ src/network/HttpDownloader                                                [built
 
 src/activities/reader/companion/
   CompanionFiles.{h,cpp}         SD paths, reads and atomic writes         [built]
-  CompanionChatActivity          the conversation surface (§7.2)          [planned, M2b]
-  CompanionAnswerView            paginated reply rendering                [planned, M2b]
+  CompanionConfig.{h,cpp}        endpoint, model, credential from SD       [built]
+  CompanionPageText.h            current page -> plain text for context    [built]
+  CompanionChatActivity          the conversation surface (§7.2)           [built]
   CompanionSelectActivity        range selection                          [planned, M4]
 
+  The reply is shown by the reader's existing DictionaryDefinitionActivity,
+  already a paginated viewer with CJK wrapping and batched SD-font loading.
+  Renaming it to a neutral PagedTextActivity is the tidy follow-up; writing a
+  second text layout engine was not worth the better name.
+
 src/activities/settings/
-  CompanionSettingsActivity      endpoint, model, credential, disclaimer  [planned, M2b]
+  CompanionSettingsActivity      a settings screen for the above           [not planned]
+    Connection settings live in /companion/config.txt instead, for the same
+    reason the persona does: they are configuration, and a four-button device
+    is a poor place to type a URL and a credential.
 
 test/ai_companion/               gtest suite, registered in test/CMakeLists.txt  [built]
 ```
@@ -487,12 +496,17 @@ pass; §14 asks whether it is worth supporting at all.
 | **M1** | `HttpDownloader::postJson()`; one real exchange end-to-end in the desktop simulator | `pio run -e simulator -t run_simulator` (the host build verifies certificates through the system trust store) |
 | **M2a** | Companion data layer: persona, question set and per-book history, all taking buffers so file I/O stays at the device edge | Host: parsing, caps, eviction, save/load round-trip, and the shipped `assets/companion/` files |
 | **M2b-1** | `HttpDownloader::postJson()` and `CompanionFiles` — the device edge | CI: first compile of `lib/AiCompanion` into firmware |
-| **M2b-2** | **A1 + A2** — the chapter-end conversation activity | Device: first exchange that reads as a companion; heap before/after |
+| **M2b-2** | **A1 + A2 + A4 + A5** — the conversation activity, the reader-menu entry and the continuation actions | CI: compiles for the C3 baseline. Device: first exchange that reads as a companion; heap before/after |
 | **M3** | **A3 + A4** — history and continuation actions | Device: a multi-turn conversation surviving a power cycle |
 | **M4** | **A5 + B1** — editable questions, passage discussion | Device: selection, refresh behaviour, cancellation, heap across 20 exchanges |
 | **M5** | **B2 + B3** — resume brief, saved exchanges with KOReader fields | Device + export round-trip |
 
 M0 and M1 are entirely host-side; nothing is flashed before M2.
+
+M0 through M2b-2 are implemented and pass CI, including the firmware build for
+the ESP32-C3 baseline. What remains before a reader can use this on hardware is
+a flash and an actual chapter: no part of it has run on a device yet, and
+nothing here establishes how it feels to read with.
 
 **M2 is the first milestone that delivers the actual product.** It is chosen as
 the MVP because a chapter boundary needs no text selection, is already a reading
