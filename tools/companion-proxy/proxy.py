@@ -273,11 +273,42 @@ def merge_history(body: dict[str, Any], book: str) -> str:
     if not entries:
         return bare_question(question)
 
-    body["messages"] = system + as_turns(entries) + [
-        {"role": "user", "content": question}
-    ]
+    body["messages"] = [correct_days_away(m, entries) for m in system] + as_turns(
+        entries
+    ) + [{"role": "user", "content": question}]
     log.info("replayed %d recorded exchanges for %s", len(entries), book)
     return bare_question(question)
+
+
+_DAYS_LINE = "Days since you last talked about it: "
+
+
+def correct_days_away(message: dict[str, Any], entries: list[dict[str, Any]]) -> dict[str, Any]:
+    """Fix the reader's "how long has it been" against the proxy's record.
+
+    The e-reader counts from its own local history, which holds only the turns it
+    made itself. If the argument about a character happened on the phone
+    yesterday, the reader still believes it has been a fortnight -- and says so,
+    in the system prompt, as a fact. The proxy has the superset here as
+    everywhere else, so it owns this number too.
+
+    Only ever rewrites a line the reader already put there: whether to ask a
+    resume question at all stays the device's decision.
+    """
+    text = message.get("content")
+    if not isinstance(text, str) or _DAYS_LINE not in text:
+        return message
+    last_at = max((int(e.get("at") or 0) for e in entries), default=0)
+    if last_at <= 0:
+        return message
+    days = max(0, int((time.time() - last_at) // 86400))
+    lines = [
+        f"{_DAYS_LINE}{days}" if line.startswith(_DAYS_LINE) else line
+        for line in text.splitlines()
+    ]
+    corrected = dict(message)
+    corrected["content"] = "\n".join(lines)
+    return corrected
 
 
 # --------------------------------------------------------------------------- providers

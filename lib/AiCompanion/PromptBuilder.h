@@ -34,6 +34,11 @@ class PromptBuilder {
     const char* author = nullptr;
     const char* chapterTitle = nullptr;
     int percent = -1;  // negative omits it
+    // How long since the two of them last talked about this book. Negative
+    // omits it, which is also what an unset device clock has to produce: the
+    // companion may say nothing about the gap, but it must never be confidently
+    // wrong about it.
+    int daysSinceLastTalk = -1;
   };
 
   // One completed round of conversation. Oldest first; the builder drops from

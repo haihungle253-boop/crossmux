@@ -69,6 +69,11 @@ class CompanionChatActivity final : public Activity {
   static constexpr size_t REQUEST_BYTES = 12288;
   static constexpr size_t REPLY_BYTES = 8192;
 
+  // How long away counts as having lost the thread. Short enough that the
+  // offer is still useful, long enough that a reader who picks the book up
+  // every evening never sees it.
+  static constexpr int RESUME_AFTER_DAYS = 3;
+
   void buildQuestionList();
   void buildFollowUpList();
   // The list the selection is currently moving over: openers before the first
@@ -99,6 +104,15 @@ class CompanionChatActivity final : public Activity {
   std::vector<std::string> questions;
   std::vector<std::string> followUps;
   int selected = 0;
+
+  // Days since the last recorded exchange about this book, or -1 when there is
+  // none or the device clock cannot be trusted.
+  int daysSinceLastTalk = -1;
+  // Whether the openers begin with "where did we leave off", and whether that
+  // is the one being asked right now -- a resume question is about the
+  // conversation, so it travels without the current page attached.
+  bool resumeOffered = false;
+  bool askingForResume = false;
 
   State state = State::PickQuestion;
   StrId errorMessage = StrId::STR_COMPANION_UNREACHABLE;

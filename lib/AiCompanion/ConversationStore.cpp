@@ -31,6 +31,12 @@ const char* ConversationStore::reply(const size_t index) const {
   return index < exchangeCount ? arena + entries[index].replyOffset : "";
 }
 
+uint32_t ConversationStore::timestamp(const size_t index) const {
+  return index < exchangeCount ? entries[index].at : 0;
+}
+
+uint32_t ConversationStore::lastTimestamp() const { return exchangeCount > 0 ? entries[exchangeCount - 1].at : 0; }
+
 bool ConversationStore::fits(const size_t questionLength, const size_t replyLength) const {
   // Two NUL terminators, so every stored string can be handed out as a C string.
   return arenaUsed + questionLength + replyLength + 2 <= ARENA_BYTES && exchangeCount < MAX_EXCHANGES;
@@ -56,7 +62,7 @@ void ConversationStore::dropOldest() {
   ++evictedCount;
 }
 
-bool ConversationStore::append(const char* question_, const char* reply_) {
+bool ConversationStore::append(const char* question_, const char* reply_, const uint32_t at) {
   const size_t questionLength = cappedLength(question_, MAX_QUESTION_BYTES);
   const size_t replyLength = cappedLength(reply_, MAX_REPLY_BYTES);
   if (questionLength == 0 && replyLength == 0) return false;
@@ -68,6 +74,7 @@ bool ConversationStore::append(const char* question_, const char* reply_) {
   while (!fits(questionLength, replyLength)) dropOldest();
 
   Entry entry{};
+  entry.at = at;
   entry.questionOffset = static_cast<uint16_t>(arenaUsed);
   entry.questionLength = static_cast<uint16_t>(questionLength);
   if (questionLength > 0) memcpy(arena + arenaUsed, question_, questionLength);
@@ -97,7 +104,7 @@ size_t ConversationStore::toExchanges(PromptBuilder::Exchange* out, const size_t
 size_t ConversationStore::serializedSize() const {
   size_t total = HEADER_BYTES;
   for (size_t i = 0; i < exchangeCount; ++i) {
-    total += 4;  // two uint16 lengths
+    total += 8;  // two uint16 lengths and the uint32 timestamp
     total += entries[i].questionLength;
     total += entries[i].replyLength;
   }
@@ -123,10 +130,13 @@ size_t ConversationStore::serialize(uint8_t* out, const size_t cap) const {
   for (size_t i = 0; i < exchangeCount; ++i) {
     const uint16_t questionLength = entries[i].questionLength;
     const uint16_t replyLength = entries[i].replyLength;
+    const uint32_t at = entries[i].at;
     memcpy(out + offset, &questionLength, sizeof(questionLength));
     offset += sizeof(questionLength);
     memcpy(out + offset, &replyLength, sizeof(replyLength));
     offset += sizeof(replyLength);
+    memcpy(out + offset, &at, sizeof(at));
+    offset += sizeof(at);
     memcpy(out + offset, arena + entries[i].questionOffset, questionLength);
     offset += questionLength;
     memcpy(out + offset, arena + entries[i].replyOffset, replyLength);
@@ -150,19 +160,29 @@ bool ConversationStore::deserialize(const uint8_t* data, const size_t len) {
   memcpy(&storedCount, data + offset, sizeof(storedCount));
   offset += sizeof(storedCount);
 
-  if (magic != MAGIC || version != VERSION || storedCount > MAX_EXCHANGES) return false;
+  if (magic != MAGIC || storedCount > MAX_EXCHANGES) return false;
+  const bool hasTimestamps = version == VERSION;
+  if (!hasTimestamps && version != VERSION_WITHOUT_TIMESTAMPS) return false;
+
+  // Version 1 wrote two lengths per exchange; version 2 writes a timestamp too.
+  const size_t entryHeaderBytes = hasTimestamps ? 8u : 4u;
 
   for (uint16_t i = 0; i < storedCount; ++i) {
-    if (offset + 4 > len) {
+    if (offset + entryHeaderBytes > len) {
       clear();
       return false;
     }
     uint16_t questionLength = 0;
     uint16_t replyLength = 0;
+    uint32_t at = 0;
     memcpy(&questionLength, data + offset, sizeof(questionLength));
     offset += sizeof(questionLength);
     memcpy(&replyLength, data + offset, sizeof(replyLength));
     offset += sizeof(replyLength);
+    if (hasTimestamps) {
+      memcpy(&at, data + offset, sizeof(at));
+      offset += sizeof(at);
+    }
 
     if (questionLength > MAX_QUESTION_BYTES || replyLength > MAX_REPLY_BYTES ||
         offset + questionLength + replyLength > len || !fits(questionLength, replyLength)) {
@@ -171,6 +191,7 @@ bool ConversationStore::deserialize(const uint8_t* data, const size_t len) {
     }
 
     Entry entry{};
+    entry.at = at;
     entry.questionOffset = static_cast<uint16_t>(arenaUsed);
     entry.questionLength = questionLength;
     memcpy(arena + arenaUsed, data + offset, questionLength);

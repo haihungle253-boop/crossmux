@@ -17,6 +17,7 @@
 #include "components/UITheme.h"
 #include "fontIds.h"
 #include "network/HttpDownloader.h"
+#include "util/TimeUtils.h"
 
 namespace {
 
@@ -44,6 +45,19 @@ void CompanionChatActivity::onEnter() {
   personaIsFallback = persona->usingFallback();
   CompanionFiles::loadQuestions(*questionSet);
   CompanionFiles::loadHistory(context.bookPath, *history);
+
+  // getCurrentValidTimestamp() returns 0 when the clock has not been set, and
+  // exchanges stored while it was unset carry 0 too. Either way the gap stays
+  // unknown and the offer is simply not made -- a companion that announces "it
+  // has been 20440 days" because the clock came up at the epoch is worse than
+  // one that says nothing.
+  const uint32_t lastAt = history->lastTimestamp();
+  const uint32_t nowSeconds = TimeUtils::getCurrentValidTimestamp();
+  if (lastAt > 0 && nowSeconds > lastAt) {
+    daysSinceLastTalk = static_cast<int>((nowSeconds - lastAt) / 86400u);
+  }
+  resumeOffered = !history->empty() && daysSinceLastTalk >= RESUME_AFTER_DAYS;
+
   buildQuestionList();
   buildFollowUpList();
 
@@ -70,15 +84,20 @@ void CompanionChatActivity::onExit() {
 
 void CompanionChatActivity::buildQuestionList() {
   questions.clear();
+  // First, because it is the question a reader returning to a half-read book
+  // actually has, and because it is the one that stops being useful the moment
+  // they have read on.
+  if (resumeOffered) questions.emplace_back(tr(STR_COMPANION_Q_RESUME));
+
   const size_t count = questionSet->count();
   if (count > 0) {
-    questions.reserve(count);
+    questions.reserve(questions.size() + count);
     for (size_t i = 0; i < count; ++i) questions.emplace_back(questionSet->at(i));
     return;
   }
   // No questions.txt yet. The built-in list is translated, which is why it
   // lives here rather than in the library.
-  questions.reserve(3);
+  questions.reserve(questions.size() + 3);
   questions.emplace_back(tr(STR_COMPANION_Q_CHAPTER));
   questions.emplace_back(tr(STR_COMPANION_Q_CRAFT));
   questions.emplace_back(tr(STR_COMPANION_Q_CHARACTER));
@@ -138,6 +157,7 @@ void CompanionChatActivity::launchKeyboard() {
               failWith(StrId::STR_COMPANION_UNREACHABLE);
               return;
             }
+            askingForResume = false;  // a typed question is about the page, not the gap
             runExchange(typed);
           },
           std::string(tr(STR_COMPANION_YOUR_QUESTION)), std::string(), size_t{240}, InputType::Text)) {
@@ -190,6 +210,7 @@ void CompanionChatActivity::loop() {
 }
 
 void CompanionChatActivity::startAsk() {
+  askingForResume = resumeOffered && state == State::PickQuestion && selected == 0;
   if (WiFi.status() != WL_CONNECTED) {
     launchWifiSelection();
     return;
@@ -235,6 +256,7 @@ void CompanionChatActivity::runExchange(const std::string& question) {
   position.author = context.author.empty() ? nullptr : context.author.c_str();
   position.chapterTitle = context.chapterTitle.empty() ? nullptr : context.chapterTitle.c_str();
   position.percent = context.percent;
+  position.daysSinceLastTalk = askingForResume ? daysSinceLastTalk : -1;
 
   std::array<PromptBuilder::Exchange, ConversationStore::MAX_EXCHANGES> exchanges{};
   const size_t replayed = history->toExchanges(exchanges.data(), exchanges.size());
@@ -242,7 +264,12 @@ void CompanionChatActivity::runExchange(const std::string& question) {
   builder.setModel(config.model());
   builder.setPersona(persona->text());
   builder.setPosition(position);
-  builder.setExcerpt(context.excerpt.empty() ? nullptr : context.excerpt.c_str());
+  // "Where did we leave off" is answered from the conversation, not from
+  // whatever page happens to be open -- which may be one the reader has not read
+  // yet. Leaving the excerpt out keeps the question honest and buys 3 KB for the
+  // history that does answer it.
+  const bool sendExcerpt = !askingForResume && !context.excerpt.empty();
+  builder.setExcerpt(sendExcerpt ? context.excerpt.c_str() : nullptr);
   builder.setHistory(exchanges.data(), replayed);
   builder.setQuestion(question.c_str());
   builder.setMaxTokens(config.maxTokens());
@@ -313,8 +340,17 @@ void CompanionChatActivity::runExchange(const std::string& question) {
 
   // Recorded only once the reply is complete, so a failed exchange leaves no
   // half-turn for the next request to replay.
-  history->append(question.c_str(), reply.c_str());
+  history->append(question.c_str(), reply.c_str(), TimeUtils::getCurrentValidTimestamp());
   CompanionFiles::saveHistory(context.bookPath, *history);
+
+  // They have just caught up, so stop offering to catch them up.
+  if (resumeOffered) {
+    resumeOffered = false;
+    askingForResume = false;
+    buildQuestionList();
+    selected = 0;
+  }
+
   showAnswer(question, reply);
 }
 

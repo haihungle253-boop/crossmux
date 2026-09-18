@@ -27,7 +27,11 @@ class ConversationStore {
   static constexpr size_t MAX_REPLY_BYTES = 1024;
 
   static constexpr uint32_t MAGIC = 0x31434D43;  // "CMC1"
-  static constexpr uint16_t VERSION = 1;
+  // 2 added a per-exchange timestamp. Version 1 files are still read -- their
+  // exchanges simply have no time -- because refusing them would throw away a
+  // reader's conversation to gain a feature they had not asked for.
+  static constexpr uint16_t VERSION = 2;
+  static constexpr uint16_t VERSION_WITHOUT_TIMESTAMPS = 1;
   static constexpr size_t HEADER_BYTES = 8;
 
   void clear();
@@ -35,13 +39,23 @@ class ConversationStore {
   // Appends a completed exchange, dropping the oldest as needed. Returns false
   // only if the exchange is unusable (both sides empty) or cannot fit even in an
   // empty arena, in which case nothing is stored and nothing is dropped.
-  bool append(const char* question, const char* reply);
+  //
+  // `at` is epoch seconds, or 0 when the device's clock is not trustworthy. It
+  // is what lets the companion notice that a reader has been away, so 0 has to
+  // mean "no idea" rather than "the epoch": a wrong clock must not produce a
+  // confident claim about how long it has been.
+  bool append(const char* question, const char* reply, uint32_t at = 0);
 
   size_t count() const { return exchangeCount; }
   bool empty() const { return exchangeCount == 0; }
   // index 0 is the oldest retained exchange.
   const char* question(size_t index) const;
   const char* reply(size_t index) const;
+  // Epoch seconds, or 0 if unknown (clock unset when it was stored, or the file
+  // predates version 2).
+  uint32_t timestamp(size_t index) const;
+  // When the newest retained exchange happened, or 0 if unknown.
+  uint32_t lastTimestamp() const;
 
   size_t usedBytes() const { return arenaUsed; }
   // Exchanges dropped to make room, over this object's lifetime.
@@ -69,6 +83,7 @@ class ConversationStore {
     uint16_t questionLength;
     uint16_t replyOffset;
     uint16_t replyLength;
+    uint32_t at;
   };
 
   void dropOldest();

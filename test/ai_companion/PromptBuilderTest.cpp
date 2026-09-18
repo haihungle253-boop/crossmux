@@ -243,4 +243,29 @@ TEST(PromptBuilder, SucceedsWithNoHistoryWhenEvenOneExchangeWillNotFit) {
   EXPECT_EQ(builder.droppedExchanges(), 1u);
 }
 
+TEST(PromptBuilder, TellsTheCompanionHowLongTheReaderHasBeenAway) {
+  std::array<char, 2048> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  PromptBuilder::Position position = samplePosition();
+  builder.setPosition(position);
+  builder.setQuestion("上次我们聊到哪儿了？");
+
+  // Unknown by default: an unset device clock must produce silence, not a
+  // confident number.
+  ASSERT_TRUE(builder.build());
+  EXPECT_FALSE(contains(builder.body(), "Days since you last talked"));
+
+  position.daysSinceLastTalk = 12;
+  builder.setPosition(position);
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_TRUE(contains(builder.body(), "Days since you last talked about it: 12"));
+
+  // Same day still counts as known, and says so.
+  position.daysSinceLastTalk = 0;
+  builder.setPosition(position);
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(contains(builder.body(), "Days since you last talked about it: 0"));
+}
+
 }  // namespace

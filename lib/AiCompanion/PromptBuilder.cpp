@@ -141,6 +141,10 @@ bool PromptBuilder::putSystemMessage() {
     if (!putInt(position.percent)) return false;
     if (!putRaw("% of the book")) return false;
   }
+  if (position.daysSinceLastTalk >= 0) {
+    if (!putRaw("\\nDays since you last talked about it: ")) return false;
+    if (!putInt(position.daysSinceLastTalk)) return false;
+  }
 
   if (!putRaw(GUARD_RULES)) return false;
   return putRaw("\"}");

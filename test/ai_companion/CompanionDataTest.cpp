@@ -263,6 +263,67 @@ TEST(ConversationStore, RejectsCorruptedDataAndStaysEmpty) {
   }
 }
 
+TEST(ConversationStore, RemembersWhenEachExchangeHappened) {
+  ConversationStore store;
+  store.append("早些时候问的", "早些时候答的", 1700000000u);
+  store.append("刚才问的", "刚才答的", 1700600000u);
+
+  EXPECT_EQ(store.timestamp(0), 1700000000u);
+  EXPECT_EQ(store.timestamp(1), 1700600000u);
+  EXPECT_EQ(store.lastTimestamp(), 1700600000u);
+
+  std::vector<uint8_t> blob(store.serializedSize());
+  ASSERT_EQ(store.serialize(blob.data(), blob.size()), blob.size());
+
+  ConversationStore restored;
+  ASSERT_TRUE(restored.deserialize(blob.data(), blob.size()));
+  EXPECT_EQ(restored.lastTimestamp(), 1700600000u);
+  EXPECT_STREQ(restored.question(0), "早些时候问的");
+}
+
+TEST(ConversationStore, ClockUnsetLeavesTheTimeUnknownRatherThanTheEpoch) {
+  // 0 has to survive as "no idea". Anything else -- silently substituting the
+  // current time, say -- would let a device whose clock has never been set claim
+  // the reader was away for decades.
+  ConversationStore store;
+  store.append("问", "答");
+  EXPECT_EQ(store.lastTimestamp(), 0u);
+}
+
+TEST(ConversationStore, ReadsAVersion1FileWrittenBeforeTimestampsExisted) {
+  // A reader upgrading firmware has version 1 histories on the SD card. Refusing
+  // them would silently throw away every conversation they have had, to gain a
+  // feature they did not ask for. They load; their exchanges simply have no time,
+  // which suppresses the resume offer rather than faking it.
+  const std::string question = "上次聊到哪儿了";
+  const std::string reply = "聊到第十二章";
+
+  std::vector<uint8_t> v1;
+  auto push = [&v1](const void* bytes, size_t n) {
+    const auto* p = static_cast<const uint8_t*>(bytes);
+    v1.insert(v1.end(), p, p + n);
+  };
+  const uint32_t magic = ConversationStore::MAGIC;
+  const uint16_t version = ConversationStore::VERSION_WITHOUT_TIMESTAMPS;
+  const uint16_t count = 1;
+  push(&magic, sizeof(magic));
+  push(&version, sizeof(version));
+  push(&count, sizeof(count));
+  const auto questionLength = static_cast<uint16_t>(question.size());
+  const auto replyLength = static_cast<uint16_t>(reply.size());
+  push(&questionLength, sizeof(questionLength));
+  push(&replyLength, sizeof(replyLength));  // and no timestamp, which is the point
+  push(question.data(), question.size());
+  push(reply.data(), reply.size());
+
+  ConversationStore store;
+  ASSERT_TRUE(store.deserialize(v1.data(), v1.size()));
+  ASSERT_EQ(store.count(), 1u);
+  EXPECT_STREQ(store.question(0), question.c_str());
+  EXPECT_STREQ(store.reply(0), reply.c_str());
+  EXPECT_EQ(store.lastTimestamp(), 0u);
+}
+
 TEST(ConversationStore, EmptyStoreRoundTrips) {
   ConversationStore store;
   std::vector<uint8_t> blob(store.serializedSize());

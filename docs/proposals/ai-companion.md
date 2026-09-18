@@ -287,7 +287,7 @@ hardcoded, so the reader tunes it against their own patience and page size.
 | ID | Feature | Notes |
 |---|---|---|
 | **B1** | **Discuss a passage** | Range selection (§6.3) → "what do you make of this" |
-| **B2** | **Resume brief** | Reopening after *N* days: where you left off and what you two last discussed. Distinct from v1's version because it can draw on conversation history, not just the text. |
+| **B2** | **Resume brief** `[built]` | Reopening after 3 days: the openers begin with "where did we leave off", answered from the conversation rather than the open page. Distinct from v1's version because it draws on conversation history, not just the text. |
 | **B3** | **Saved exchanges** | Persist an exchange as a note anchored to the position (§9.7) |
 | **B4** | **Marked passages** | Mark while reading with no radio; discuss them together later (§9.5) |
 
@@ -499,14 +499,39 @@ pass; §14 asks whether it is worth supporting at all.
 | **M2b-2** | **A1 + A2 + A4 + A5** — the conversation activity, the reader-menu entry and the continuation actions | CI: compiles for the C3 baseline. Device: first exchange that reads as a companion; heap before/after |
 | **M3** | **A3 + A4** — history and continuation actions | Device: a multi-turn conversation surviving a power cycle |
 | **M4** | **A5 + B1** — editable questions, passage discussion | Device: selection, refresh behaviour, cancellation, heap across 20 exchanges |
-| **M5** | **B2 + B3** — resume brief, saved exchanges with KOReader fields | Device + export round-trip |
+| **M5** | **B3** — saved exchanges with KOReader fields | Device + export round-trip |
+| — | **B2** — resume brief, brought forward: it needed only a timestamp per exchange and one conditional opener | Host: version 1 histories still load; the gap stays unknown when the clock is unset. Device: the offer appearing after a real gap |
 
 M0 and M1 are entirely host-side; nothing is flashed before M2.
 
 M0 through M2b-2 are implemented and pass CI, including the firmware build for
-the ESP32-C3 baseline. What remains before a reader can use this on hardware is
-a flash and an actual chapter: no part of it has run on a device yet, and
-nothing here establishes how it feels to read with.
+the ESP32-C3 baseline, as are the self-hosted proxy, the phone chat surface, and
+B2. What remains before a reader can use this on hardware is a flash and an
+actual chapter: no part of it has run on a device yet, and nothing here
+establishes how it feels to read with.
+
+### 12.1 What B2 rests on
+
+The resume brief is the first feature that depends on the device knowing what
+time it is, and CrossPoint's clock is not guaranteed to be set. Every part of
+the feature is therefore built to be silent rather than wrong:
+`TimeUtils::getCurrentValidTimestamp()` returns 0 when the clock is untrustworthy,
+exchanges stored under an unset clock keep a timestamp of 0, and both cases leave
+the gap unknown, which suppresses the offer instead of announcing a gap of
+twenty thousand days.
+
+The on-disk history format went to version 2 to carry the timestamps. Version 1
+files still load, with their exchanges simply having no time: refusing them would
+have thrown away a reader's existing conversations to gain a feature they had not
+asked for.
+
+One inaccuracy remains inherent to the device, and the proxy resolves it. The
+reader counts the gap from its own local history, which holds only the turns it
+made itself; an argument on the phone yesterday leaves the reader still believing
+it has been a fortnight. So the proxy, which holds the superset, rewrites that
+line the same way it replaces the history under it — and only ever rewrites a line
+the reader already put there, because whether to offer a resume at all stays the
+device's decision.
 
 **M2 is the first milestone that delivers the actual product.** It is chosen as
 the MVP because a chapter boundary needs no text selection, is already a reading
