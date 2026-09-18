@@ -6,7 +6,9 @@ add_executable(AiCompanionTest
   AiChatClientTest.cpp
   CompanionDataTest.cpp
   CompanionConfigTest.cpp
+  MarkdownPlainTest.cpp
   ${REPO_ROOT}/lib/AiCompanion/AiChatClient.cpp
+  ${REPO_ROOT}/lib/AiCompanion/MarkdownPlain.cpp
   ${REPO_ROOT}/lib/AiCompanion/PersonaStore.cpp
   ${REPO_ROOT}/lib/AiCompanion/QuestionSet.cpp
   ${REPO_ROOT}/lib/AiCompanion/ConversationStore.cpp

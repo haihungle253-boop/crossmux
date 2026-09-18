@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "AiChatClient.h"
+#include "MarkdownPlain.h"
 #include "PromptBuilder.h"
 #include "activities/network/WifiSelectionActivity.h"
 #include "activities/reader/DictionaryDefinitionActivity.h"
@@ -362,6 +363,11 @@ StrId CompanionChatActivity::statusMessage(const int status) {
 
 void CompanionChatActivity::showAnswer(const std::string& question, const std::string& reply) {
   state = State::ShowingAnswer;
+  // The reader below renders a plain string and has no inline style to give
+  // `**like this**`, so the markers come off here rather than reaching the
+  // panel. Only the displayed copy is flattened: history keeps what the model
+  // actually said, which is what gets replayed to it later.
+  const std::string shown = MarkdownPlain::flatten(reply);
   if (!startActivityForResultWith<DictionaryDefinitionActivity>(
           [this](const ActivityResult&) {
             // The conversation continues from here rather than resetting to the
@@ -371,7 +377,7 @@ void CompanionChatActivity::showAnswer(const std::string& question, const std::s
             selected = 0;
             requestUpdate();
           },
-          question, reply, false)) {
+          question, shown, false)) {
     failWith(StrId::STR_COMPANION_UNREACHABLE);
   }
 }
