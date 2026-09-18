@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "CompanionConfig.h"
 #include "ConversationStore.h"
 #include "PersonaStore.h"
 #include "QuestionSet.h"
@@ -21,6 +22,7 @@ namespace CompanionFiles {
 inline constexpr const char* COMPANION_DIR = "/companion";
 inline constexpr const char* PERSONA_PATH = "/companion/persona.txt";
 inline constexpr const char* QUESTIONS_PATH = "/companion/questions.txt";
+inline constexpr const char* CONFIG_PATH = "/companion/config.txt";
 inline constexpr const char* STATE_DIR = "/.crosspoint/companion";
 
 // Reads /companion/persona.txt. A missing or unreadable file is not an error:
@@ -33,6 +35,11 @@ bool loadPersona(PersonaStore& store);
 // caller supplies translated defaults, which cannot live in a library that has
 // no notion of tr().
 bool loadQuestions(QuestionSet& set);
+
+// Reads /companion/config.txt. Returns false when the file is absent or does
+// not yield a usable endpoint, in which case the companion is simply not set
+// up yet and the UI says so rather than treating it as a failure.
+bool loadConfig(CompanionConfig& config);
 
 // Per-book history file, derived from the book's path the same way bookmarks
 // are (BookmarkUtil), so the two stay consistent for the same book.

@@ -1,0 +1,22 @@
+# 读书搭子 · 连接配置
+# Reading Companion · connection settings
+#
+# 把这个文件和 persona.txt 放在一起，也就是 SD 卡上的 /companion/config.txt
+# 改完保存即可，不需要重新刷固件。
+#
+# 一行一项，格式是  名字 = 值 。以 # 开头的行会被忽略。
+
+# 服务地址：任何 OpenAI 兼容的 chat completions 接口都行。
+# 推荐填你自己的代理（例如树莓派），这样真密钥就不用放在 SD 卡上。
+endpoint = https://你的地址/v1/chat/completions
+
+# 模型名，原样转发给服务端。
+model = gpt-4o-mini
+
+# 访问凭证，作为 Authorization 发送。
+# 注意：这个文件是明文的。请尽量填一个只能访问你自己代理的令牌，
+# 而不是服务商的主密钥 —— 万一 SD 卡丢了，你只需要注销这一个令牌。
+key = 在这里填你的令牌
+
+# 回复长度上限（可选）。填 0 或删掉这一行，就完全交给 persona.txt 里的约定。
+max_tokens = 0

@@ -5,10 +5,12 @@ add_executable(AiCompanionTest
   StreamPipelineTest.cpp
   AiChatClientTest.cpp
   CompanionDataTest.cpp
+  CompanionConfigTest.cpp
   ${REPO_ROOT}/lib/AiCompanion/AiChatClient.cpp
   ${REPO_ROOT}/lib/AiCompanion/PersonaStore.cpp
   ${REPO_ROOT}/lib/AiCompanion/QuestionSet.cpp
   ${REPO_ROOT}/lib/AiCompanion/ConversationStore.cpp
+  ${REPO_ROOT}/lib/AiCompanion/CompanionConfig.cpp
   ${REPO_ROOT}/lib/AiCompanion/SseDecoder.cpp
   ${REPO_ROOT}/lib/AiCompanion/AiChatParser.cpp
   ${REPO_ROOT}/lib/AiCompanion/PromptBuilder.cpp

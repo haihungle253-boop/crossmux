@@ -14,6 +14,7 @@ constexpr char LOG_TAG[] = "COMPANION";
 // can be kept. One byte spare for the terminator readFileToBuffer writes.
 constexpr size_t PERSONA_READ_BYTES = PersonaStore::MAX_BYTES + 1;
 constexpr size_t QUESTIONS_READ_BYTES = QuestionSet::MAX_QUESTIONS * (QuestionSet::MAX_QUESTION_BYTES + 2) + 1;
+constexpr size_t CONFIG_READ_BYTES = 1024;
 
 // Reads a whole text file into a heap buffer. Returns an empty unique_ptr when
 // the file is absent or unreadable; outLength receives the byte count.
@@ -69,6 +70,23 @@ bool loadQuestions(QuestionSet& set) {
     LOG_DBG(LOG_TAG, "questions.txt: %u lines past the cap were ignored", static_cast<unsigned>(set.ignoredLines()));
   }
   return !set.empty();
+}
+
+bool loadConfig(CompanionConfig& config) {
+  size_t length = 0;
+  const auto buffer = readTextFile(CONFIG_PATH, CONFIG_READ_BYTES, length);
+  if (!buffer) {
+    config.clear();
+    return false;
+  }
+
+  const bool usable = config.load(buffer.get(), length);
+  if (!usable) {
+    LOG_ERR(LOG_TAG, "config.txt has no usable endpoint");
+  } else if (config.unknownKeys() > 0) {
+    LOG_DBG(LOG_TAG, "config.txt: %u unrecognised keys", static_cast<unsigned>(config.unknownKeys()));
+  }
+  return usable;
 }
 
 std::string historyPath(const std::string& bookPath) {
