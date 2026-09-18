@@ -15,6 +15,14 @@ Emrys 有一台 Waveshare 3.97 寸墨水屏阅读器，刷的是 CrossMux 固件
 2. 换服务商 / 换模型只改树莓派的配置，不用重刷固件
 3. 通过 Cloudflare 隧道拿到 HTTPS，不用改路由器
 
+**代理还带一个手机聊天页面。** 墨水屏只有四个按键、没有触摸屏，打字很慢，
+所以长篇的自由讨论放在手机上；墨水屏负责「读到哪了」，手机负责「聊」。
+
+两边共用树莓派上的同一份对话记录 —— 这是整件事的关键：代理转发了每一次对话，
+所以它手上那份记录是超集。墨水屏提问时，代理会用自己这份记录替换掉墨水屏本地那份，
+于是下午在手机上争论过的角色，晚上读完一章在墨水屏上问，它记得。
+**这意味着树莓派这一端出问题，两个界面会一起失忆** —— 所以部署要认真对待。
+
 代理已经写好并在云端测试通过了。**现在需要你在真实的树莓派上验证和部署。**
 
 
@@ -30,11 +38,15 @@ cd crossmux/tools/companion-proxy
 
 | 文件 | 说明 |
 |---|---|
-| `proxy.py` | 代理本体，单文件，约 265 行 |
+| `proxy.py` | 代理本体，单文件，约 590 行 |
+| `web/index.html` | 手机聊天页面，单文件，无构建步骤、无依赖 |
 | `config.example.toml` | 配置模板 |
 | `requirements.txt` | Python 依赖 |
 | `companion-proxy.service` | systemd 单元 |
 | `README.md` | 完整安装指南（**这份是盲写的，需要你核对**） |
+
+运行时还会自己建一个 `history/` 目录（一本书一个 JSON，存对话内容）。
+它已经在 `.gitignore` 里 —— **里面是 Emrys 的私人阅读对话，不要提交、不要外发。**
 
 
 ## 任务一：核对环境（最重要）
@@ -64,7 +76,9 @@ apt-cache policy cloudflared      # apt 源里有没有 cloudflared
 
 ```bash
 mkdir -p ~/companion-proxy && cd ~/companion-proxy
-cp <仓库路径>/tools/companion-proxy/{proxy.py,config.example.toml,requirements.txt,companion-proxy.service} .
+SRC=<仓库路径>/tools/companion-proxy
+cp $SRC/{proxy.py,config.example.toml,requirements.txt,companion-proxy.service} .
+cp -r $SRC/web .          # ← 手机页面，漏了这一步网页打不开
 
 python3 -m venv .venv
 .venv/bin/pip install -r requirements.txt
@@ -88,6 +102,14 @@ cp config.example.toml config.toml
 #   provider.kind   = "openai"
 #   provider.base_url / api_key / model  ← 服务商密钥要问 Emrys 拿，不要自己编
 ```
+
+另外两节保持默认就行，知道它们干什么即可：
+
+- `[history]` —— `dir` 是对话记录存哪（默认 `history/`，相对于 `proxy.py`），
+  `turns` 是每本书保留多少轮（默认 20，超出的从最老的丢）。
+- `[phone]` —— 手机页面用的人设。**留空也能跑**，只是搭子没性格。
+  这里的人设要改需要重启服务；墨水屏那边的人设在 SD 卡上，改完即时生效。
+  人设内容由 Emrys 定，不要替他写。
 
 **注意：`config.toml` 已经在 `.gitignore` 里，不要提交它，里面有密钥。**
 
@@ -115,9 +137,24 @@ curl -N -X POST http://127.0.0.1:8099/v1/chat/completions \
   -H 'Content-Type: application/json' \
   -d '{"messages":[{"role":"user","content":"用一句话介绍你自己"}]}'
 # 期望：一串 data: {...} 的流式输出，最后是 data: [DONE]
+
+# 4. 手机页面确实被供出来了
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8099/
+# 期望：200。如果是 500，多半是上面 cp -r web 那一步漏了 —— 日志里会写
+#   RuntimeError: File at path .../web/index.html does not exist
+# 注意这种情况下 healthz 照样是绿的、服务照样起得来，只有网页是坏的。
+
+# 5. 手机侧的两个接口同样必须挡住无令牌的请求
+curl -s -o /dev/null -w "%{http_code}\n" http://127.0.0.1:8099/api/state
+curl -s -o /dev/null -w "%{http_code}\n" -X POST http://127.0.0.1:8099/api/chat \
+  -H 'Content-Type: application/json' -d '{"message":"hi"}'
+# 两条都期望：401
 ```
 
 第 3 步如果报错，`journalctl` 或终端里会有日志，把日志发给 Emrys。
+
+第 5 步如果返回的不是 401 而是 200，**立刻停下并告诉 Emrys** —— 那说明认证没生效，
+一旦接上隧道，任何人都能拿他的账单去聊天。
 
 
 ## 任务三：Cloudflare 隧道
@@ -134,25 +171,38 @@ Emrys 的域名是 `emrys-huginn.xyz`，托管在 Cloudflare。目标是让
 curl https://companion.emrys-huginn.xyz/healthz
 ```
 
+隧道通了之后，**这个地址同时就是手机聊天页面**：Emrys 用手机浏览器打开
+`https://companion.emrys-huginn.xyz`，第一次会让他粘贴令牌（存在浏览器本地，
+只存在他自己手机上）。请你帮他确认页面能打开、深色模式正常、能发出一条消息。
+
+⚠️ 这也意味着**页面本身是公开可达的**，挡在前面的只有那个令牌。
+所以令牌要用 `secrets.token_urlsafe(32)` 生成的那种，不要图省事换成短的。
+
 
 ## 任务四：如果你有余力
 
 这些是加分项，不做也不影响主流程：
 
 1. **限流** —— 目前代理没有限流。令牌一旦泄露，对方可以一直发到额度耗尽。
+   有了公开可达的手机页面之后这条更值得做了。
    建议加在 Cloudflare 那一侧（Rate Limiting 规则），比在代理里写更靠前也更省事。
    如果你更习惯在代理里做，也可以，但请保持 `proxy.py` 的单文件结构。
-2. **日志轮转** —— systemd 默认走 journald，一般够用，但如果你发现日志增长很快，
+2. **备份 `history/`** —— 这是墨水屏和手机共用的那份记录，也是整个功能里
+   唯一不可再生的东西：代理、配置都能重装，聊过的话丢了就没了。
+   同步到别处时请注意它是 Emrys 的私人阅读对话。
+3. **日志轮转** —— systemd 默认走 journald，一般够用，但如果你发现日志增长很快，
    可以配一下 `journald` 的保留上限。
-3. **开机自启验证** —— 装成服务后重启一次树莓派，确认代理和隧道都自动起来了。
+4. **开机自启验证** —— 装成服务后重启一次树莓派，确认代理和隧道都自动起来了。
 
 
 ## 请反馈给 Emrys 的内容
 
 1. 任务一那五条命令的**实际输出**（这决定我们要不要改 README 和 service 文件）
 2. 装的过程中**任何一步和 README 说的不一样**的地方
-3. 生成的**令牌**（Emrys 要填进墨水屏）
+3. 生成的**令牌**（Emrys 要填进墨水屏的 SD 卡，手机页面第一次打开时也要粘这个）
 4. `https://companion.emrys-huginn.xyz/healthz` 能不能通
+5. 手机浏览器打开 `https://companion.emrys-huginn.xyz` 能不能聊起来
+6. 自测第 5 步（`/api/state`、`/api/chat` 无令牌）**是不是真的返回 401**
 
 如果 README 有写错的地方，直接告诉 Emrys，我们会改。这份文档是盲写的，
 你在真机上看到的才是事实。
