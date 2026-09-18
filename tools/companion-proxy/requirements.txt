@@ -1,0 +1,7 @@
+# 基础依赖（任何服务商都需要）
+fastapi>=0.115
+uvicorn[standard]>=0.30
+httpx>=0.27
+
+# 只有 provider.kind = "anthropic" 时才需要；用别家可以不装
+anthropic>=0.40

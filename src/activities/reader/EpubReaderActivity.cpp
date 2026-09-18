@@ -45,6 +45,8 @@
 #include "RecentBooksStore.h"
 #include "SdCardFontSystem.h"
 #include "activities/settings/TextSettingsActivity.h"
+#include "companion/CompanionChatActivity.h"
+#include "companion/CompanionPageText.h"
 #include "util/BookCacheUtils.h"
 #include "util/BookmarkFile.h"
 #include "util/ReadingBackground.h"
@@ -522,6 +524,34 @@ void EpubReaderActivity::showBuildPopup(GfxRenderer& renderer, int& pagesUntilFu
   GUI.drawPopup(renderer, tr(STR_INDEXING));
   pagesUntilFullRefresh = 1;
   buildPopupPending = false;
+}
+
+// Opens a conversation about where the reader currently is. The excerpt is
+// taken from the page on screen, so the companion is told only what the reader
+// has already read -- the clipping that makes shared progress real happens
+// here, at the source, rather than being left to the prompt.
+void EpubReaderActivity::openCompanionChat() {
+  if (!epub) return;
+
+  CompanionChatActivity::Context context;
+  context.bookPath = epub->getPath();
+  context.bookTitle = epub->getTitle();
+  context.author = epub->getAuthor();
+  context.chapterTitle = getStatsChapterTitle(*epub, currentSpineIndex);
+  context.percent = clampPercent(static_cast<int>(epub->calculateProgress(currentSpineIndex, 0.0f) * 100.0f + 0.5f));
+
+  if (section && section->currentPage >= 0 && section->currentPage < section->pageCount) {
+    if (const auto page = section->loadPage(section->currentPage)) {
+      context.excerpt = CompanionPageText::extract(*page, CompanionChatActivity::EXCERPT_BYTES);
+    }
+  }
+
+  startActivityForResultWith<CompanionChatActivity>(
+      [this](const ActivityResult&) {
+        READING_STATS.resumeSession();
+        requestUpdate();
+      },
+      std::move(context));
 }
 
 void EpubReaderActivity::openDictionaryWordSelect() {
@@ -1125,6 +1155,10 @@ void EpubReaderActivity::onReaderMenuConfirm(EpubReaderMenuActivity::MenuAction 
     }
     case EpubReaderMenuActivity::MenuAction::DICTIONARY: {
       openDictionaryWordSelect();
+      break;
+    }
+    case EpubReaderMenuActivity::MenuAction::COMPANION: {
+      openCompanionChat();
       break;
     }
     case EpubReaderMenuActivity::MenuAction::DISPLAY_QR: {

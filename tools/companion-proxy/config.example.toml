@@ -1,0 +1,76 @@
+# 读书搭子代理 · 配置
+#
+# 复制这个文件为 config.toml，填好之后启动服务。
+# 改完要重启服务才生效（和 SD 卡上的人设不一样，那个是即时的）。
+
+
+[auth]
+# 墨水屏用哪个令牌连进来。这是你 API 账单和整个互联网之间唯一的一道门。
+#
+# 自己随便编一个长字符串，或者用下面这条命令生成一个：
+#     python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+#
+# 这个值也要填进 SD 卡上的 /companion/config.txt 的 key = 那一行。
+# 可以填多个，方便以后换令牌时新旧并存、平滑过渡。
+tokens = ["把生成的长字符串填在这里"]
+
+
+[provider]
+# "openai"    —— 任何 OpenAI 兼容接口：DeepSeek、Kimi、通义千问、智谱、
+#                本地 Ollama，以及 OpenAI 自己。代理原样转发。
+# "anthropic" —— Claude。接口形状不同，代理会做格式翻译。
+kind = "openai"
+
+# kind = "openai" 时填服务商的接口根地址（不用带 /chat/completions）。
+# kind = "anthropic" 时这一行会被忽略。
+#   DeepSeek : https://api.deepseek.com/v1
+#   Kimi     : https://api.moonshot.cn/v1
+#   通义千问  : https://dashscope.aliyuncs.com/compatible-mode/v1
+#   智谱 GLM  : https://open.bigmodel.cn/api/paas/v4
+#   本地 Ollama: http://127.0.0.1:11434/v1
+base_url = "https://api.deepseek.com/v1"
+
+# 服务商给你的真密钥。它只存在这台树莓派上，永远不上 SD 卡。
+api_key = "sk-在这里填你的真密钥"
+
+# 用哪个模型。换模型只改这一行，墨水屏完全不用动。
+#   DeepSeek  : deepseek-chat
+#   Kimi      : moonshot-v1-8k
+#   Claude    : claude-opus-5
+model = "deepseek-chat"
+
+# 仅 kind = "anthropic" 时有意义：思考深度。
+# 搭子的回答就两三百字，而你正盯着一块刷新很慢的屏等它，
+# 所以默认用 low —— 延迟比多想几秒更值钱。
+# 想要更有深度的文学分析，可以调成 medium 或 high。
+effort = "low"
+
+
+[limits]
+# 回复长度上限。也挡住了"模型停不下来"时的账单。
+max_tokens = 800
+
+# 等上游多久算超时（秒）。
+timeout_seconds = 120
+
+# 单次请求体大小上限（字节）。正常请求大约 2 KB。
+max_request_bytes = 65536
+
+
+[history]
+# 对话记录存在哪，以及保留多少轮。
+# 手机和墨水屏共用同一份 —— 这是「一个搭子」而不是「两个机器人」的关键。
+dir = "history"
+turns = 20
+
+
+[phone]
+# 手机页面用的人设。留空就只带阅读进度，不带性格。
+#
+# 墨水屏的人设在 SD 卡的 /companion/persona.txt 里，改那个不用重启；
+# 这里的改完要重启服务。想让两边语气一致，就把那份内容抄过来。
+persona = """
+你是我的读书搭子，我们正在一起读同一本书，进度完全同步。
+说话像老友不像老师，有自己的判断，可以不同意我。
+这章要是平淡就直说，不用硬找亮点。
+"""

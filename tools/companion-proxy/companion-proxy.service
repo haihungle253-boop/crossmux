@@ -1,0 +1,34 @@
+# systemd 服务单元 —— 让代理开机自启、崩溃自动重启。
+#
+# 安装：
+#   sudo cp companion-proxy.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now companion-proxy
+#
+# 看日志：  journalctl -u companion-proxy -f
+
+[Unit]
+Description=Reading companion proxy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/companion-proxy
+ExecStart=/home/pi/companion-proxy/.venv/bin/uvicorn proxy:app --host 127.0.0.1 --port 8099
+Restart=on-failure
+RestartSec=5
+
+# 只监听本机回环地址。外网访问一律经由 cloudflared 隧道进来，
+# 所以这个端口不需要、也不应该暴露在局域网上。
+
+# 收紧权限：这个服务只需要读自己的目录和联网。
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/companion-proxy
+
+[Install]
+WantedBy=multi-user.target
