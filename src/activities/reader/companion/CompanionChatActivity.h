@@ -57,7 +57,16 @@ class CompanionChatActivity final : public Activity {
   enum class State : uint8_t { PickQuestion, FollowUp, WifiSelection, Thinking, ShowingAnswer, TypingQuestion, Error };
 
   // Request and reply buffers, allocated only for the duration of an exchange.
-  static constexpr size_t REQUEST_BYTES = 8192;
+  //
+  // The request buffer has to hold PromptBuilder's three section caps at once
+  // (1024 persona + 4096 history + 3072 excerpt = 8192 of source text) plus JSON
+  // escaping, the spoiler guard, the reading position and the question itself,
+  // which measures at just under 9.6 KB when every section is full. 8192 was
+  // therefore not a headroom figure but a guaranteed failure once a book's
+  // history filled up. PromptBuilder drops old exchanges rather than failing
+  // now, so this is a comfort setting: enough room to keep the whole memory
+  // window instead of quietly shortening it.
+  static constexpr size_t REQUEST_BYTES = 12288;
   static constexpr size_t REPLY_BYTES = 8192;
 
   void buildQuestionList();
@@ -72,6 +81,8 @@ class CompanionChatActivity final : public Activity {
   void runExchange(const std::string& question);
   void showAnswer(const std::string& question, const std::string& reply);
   void failWith(StrId message);
+  // What the provider's HTTP status means in words the reader can act on.
+  static StrId statusMessage(int status);
 
   void drawQuestionList(int contentX, int contentWidth, int contentY);
   void drawCentered(StrId message, int contentX, int contentWidth, int contentY);

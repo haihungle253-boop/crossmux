@@ -40,6 +40,11 @@ class AiChatClient {
 
   // Asks the exchange to stop at the next chunk. Safe to set from the UI loop
   // between onData() calls.
+  //
+  // Not wired to a button yet: the POST blocks the activity's loop(), so no
+  // input is read while an exchange is in flight and there is nowhere for a
+  // Back press to be noticed. Making that true needs the transport to pump the
+  // input manager between chunks; this is the half of it that is ready.
   void cancel() { cancelled = true; }
   bool wasCancelled() const { return cancelled; }
 

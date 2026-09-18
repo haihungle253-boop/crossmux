@@ -59,8 +59,13 @@ class HttpDownloader {
    * onData. `outStatus`, when given, always receives the HTTP status (0 if the
    * request never got that far) so a caller can tell 401 from a dropped
    * connection.
+   *
+   * The body is taken as pointer and length rather than a std::string because
+   * the caller assembles it into a buffer it allocated itself: with exceptions
+   * off, a std::string large enough to hold a prompt aborts the device on a
+   * failed allocation instead of returning.
    */
-  static bool postJson(const std::string& url, const std::string& body, const DataCallback& onData,
+  static bool postJson(const std::string& url, const char* body, size_t bodyLen, const DataCallback& onData,
                        const std::string& bearerToken = "", int* outStatus = nullptr);
 
   /**

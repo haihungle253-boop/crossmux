@@ -66,6 +66,14 @@ class PromptBuilder {
 
   // Returns false if the assembled body does not fit the output buffer, in
   // which case the buffer holds an empty string rather than a partial request.
+  //
+  // The per-section caps do not add up to a guarantee: persona, history and
+  // excerpt can each be inside its own cap and still overflow the buffer
+  // together. So a build that does not fit drops the oldest exchange and tries
+  // again, as many times as it takes. Losing the far end of the conversation is
+  // a cost the reader may not even notice; failing the request outright means
+  // the companion stops answering at all, and -- since history only grows --
+  // stops answering permanently.
   bool build();
 
   const char* body() const { return out; }
@@ -100,5 +108,8 @@ class PromptBuilder {
 
   size_t len = 0;
   size_t dropped = 0;
+  // Raised by build() on each retry: the minimum number of oldest exchanges to
+  // leave out, over and above what the history cap already drops.
+  size_t forcedDrop = 0;
   bool overflow = false;
 };

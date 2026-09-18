@@ -160,8 +160,8 @@ size_t PromptBuilder::firstKeptExchange() const {
   }
   // Always keep the newest exchange, even if it alone exceeds the cap; its
   // fields are then truncated individually below.
-  if (i == historyCount && historyCount > 0) return historyCount - 1;
-  return i;
+  if (i == historyCount && historyCount > 0) i = historyCount - 1;
+  return i < forcedDrop ? forcedDrop : i;
 }
 
 bool PromptBuilder::putUserMessage() {
@@ -183,22 +183,30 @@ bool PromptBuilder::putUserMessage() {
 }
 
 bool PromptBuilder::build() {
-  len = 0;
-  dropped = 0;
-  overflow = false;
   if (!out || capacity == 0) return false;
-  out[0] = '\0';
 
-  if (buildInternal()) {
-    out[len] = '\0';
-    return true;
+  // Each pass gives up one more of the oldest exchanges. The last pass carries
+  // no history at all, which is the request the companion must always be able
+  // to make: a reader who has just opened a book is in exactly that state.
+  for (forcedDrop = 0; forcedDrop <= historyCount; ++forcedDrop) {
+    len = 0;
+    dropped = 0;
+    overflow = false;
+    out[0] = '\0';
+
+    if (buildInternal()) {
+      out[len] = '\0';
+      return true;
+    }
   }
 
   // Fail closed. Every step above bails out the moment the buffer is exhausted,
   // so what is in the buffer at that point is a truncated request. Returning it
   // would send a body the provider rejects, and the failure would look like the
   // provider's fault rather than ours.
+  forcedDrop = 0;
   len = 0;
+  dropped = 0;
   out[0] = '\0';
   return false;
 }

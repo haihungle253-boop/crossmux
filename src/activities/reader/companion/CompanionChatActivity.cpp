@@ -219,11 +219,16 @@ void CompanionChatActivity::runExchange(const std::string& question) {
   // the previous screen would read as a freeze.
   requestUpdateAndWait();
 
-  // The builder writes straight into the string's storage, so the assembled
-  // body is never copied on its way to the transport.
-  std::string body;
-  body.resize(REQUEST_BYTES);
-  PromptBuilder builder(body.data(), body.size());
+  // A no-throw allocation, like the reply buffer below: with exceptions off a
+  // std::string this size aborts the device on a failed allocation rather than
+  // letting us show the reader an error.
+  auto bodyBuf = makeUniqueNoThrow<char[]>(REQUEST_BYTES);
+  if (!bodyBuf) {
+    LOG_ERR(LOG_TAG, "OOM: %u byte request buffer", static_cast<unsigned>(REQUEST_BYTES));
+    failWith(StrId::STR_COMPANION_UNREACHABLE);
+    return;
+  }
+  PromptBuilder builder(bodyBuf.get(), REQUEST_BYTES);
 
   PromptBuilder::Position position;
   position.bookTitle = context.bookTitle.empty() ? nullptr : context.bookTitle.c_str();
@@ -247,7 +252,10 @@ void CompanionChatActivity::runExchange(const std::string& question) {
     failWith(StrId::STR_COMPANION_UNREACHABLE);
     return;
   }
-  body.resize(builder.length());
+  if (builder.droppedExchanges() > 0) {
+    LOG_INF(LOG_TAG, "dropped %u oldest exchanges to fit the request",
+            static_cast<unsigned>(builder.droppedExchanges()));
+  }
 
   auto replyBuf = makeUniqueNoThrow<char[]>(REPLY_BYTES);
   if (!replyBuf) {
@@ -261,8 +269,8 @@ void CompanionChatActivity::runExchange(const std::string& question) {
 
   int status = 0;
   const bool delivered = HttpDownloader::postJson(
-      config.endpoint(), body, [&client](const uint8_t* data, const size_t len) { return client.onData(data, len); },
-      config.key(), &status);
+      config.endpoint(), builder.body(), builder.length(),
+      [&client](const uint8_t* data, const size_t len) { return client.onData(data, len); }, config.key(), &status);
   client.end();
 
   if (client.hasError()) {
@@ -275,7 +283,10 @@ void CompanionChatActivity::runExchange(const std::string& question) {
   if (!delivered && client.replyLength() == 0) {
     LOG_ERR(LOG_TAG, "exchange failed, status=%d", status);
     errorDetail.clear();
-    failWith(StrId::STR_COMPANION_UNREACHABLE);
+    // "Could not reach the companion" sends the reader to look at Wi-Fi, which
+    // is the wrong place when the provider answered and said no. A wrong key is
+    // the likeliest first-run failure of all, so it gets its own words.
+    failWith(statusMessage(status));
     return;
   }
   if (client.replyLength() == 0) {
@@ -285,11 +296,32 @@ void CompanionChatActivity::runExchange(const std::string& question) {
   }
 
   const std::string reply(client.reply(), client.replyLength());
+  if (!delivered && !client.complete()) {
+    // Two independent ways of hearing that the reply finished: the provider's
+    // [DONE] sentinel, and the transport reaching the end of the response. Only
+    // when neither says so has the connection actually dropped part-way. Both
+    // are needed -- not every OpenAI-compatible endpoint sends the sentinel, and
+    // demanding it would mark perfectly good replies as broken.
+    //
+    // Show what came, because half an answer still reads, but do not record it:
+    // history is replayed into every later request, and a truncated assistant
+    // turn in it is a standing instruction to break off mid-sentence.
+    LOG_ERR(LOG_TAG, "reply cut short at %u bytes; not recorded", static_cast<unsigned>(client.replyLength()));
+    showAnswer(question, reply + "\n\n" + tr(STR_COMPANION_CUT_SHORT));
+    return;
+  }
+
   // Recorded only once the reply is complete, so a failed exchange leaves no
   // half-turn for the next request to replay.
   history->append(question.c_str(), reply.c_str());
   CompanionFiles::saveHistory(context.bookPath, *history);
   showAnswer(question, reply);
+}
+
+StrId CompanionChatActivity::statusMessage(const int status) {
+  if (status == 401 || status == 403) return StrId::STR_COMPANION_BAD_KEY;
+  if (status == 429 || status >= 500) return StrId::STR_COMPANION_BUSY;
+  return StrId::STR_COMPANION_UNREACHABLE;
 }
 
 void CompanionChatActivity::showAnswer(const std::string& question, const std::string& reply) {
@@ -321,12 +353,31 @@ void CompanionChatActivity::drawQuestionList(const int contentX, const int conte
   int y = contentY + metrics.topPadding + metrics.headerHeight;
 
   const auto& list = activeList();
-  for (size_t i = 0; i < list.size(); ++i) {
+
+  // questions.txt is the reader's own file and has no length limit, so the list
+  // can be longer than the panel. Without a window, the extra rows are drawn
+  // under the button hints or off the bottom entirely -- while the selection
+  // still walks onto them, leaving the reader pressing down against what looks
+  // like a frozen screen.
+  const int rowHeight = lineHeight + metrics.verticalSpacing;
+  // Whichever edge the hints are on, this is the last y a row may start at.
+  const int bottom = contentY + renderer.getScreenHeight() - metrics.buttonHintsHeight;
+  int visibleRows = rowHeight > 0 ? (bottom - y) / rowHeight : 1;
+  if (personaIsFallback) --visibleRows;  // the notice needs the last line
+  if (visibleRows < 1) visibleRows = 1;
+
+  size_t firstVisible = 0;
+  if (selected >= visibleRows) firstVisible = static_cast<size_t>(selected - visibleRows + 1);
+  const size_t lastVisible = firstVisible + static_cast<size_t>(visibleRows) < list.size()
+                                 ? firstVisible + static_cast<size_t>(visibleRows)
+                                 : list.size();
+
+  for (size_t i = firstVisible; i < lastVisible; ++i) {
     const bool isSelected = static_cast<int>(i) == selected;
     if (isSelected) renderer.drawText(UI_12_FONT_ID, x, y, ">", true, EpdFontFamily::BOLD);
     renderer.drawText(UI_12_FONT_ID, x + SELECTION_GUTTER, y, list[i].c_str(), true,
                       isSelected ? EpdFontFamily::BOLD : EpdFontFamily::REGULAR);
-    y += lineHeight + metrics.verticalSpacing;
+    y += rowHeight;
   }
 
   if (personaIsFallback) {

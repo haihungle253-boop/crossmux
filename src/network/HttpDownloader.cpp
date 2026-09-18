@@ -329,11 +329,15 @@ HttpDownloader::DownloadError HttpDownloader::downloadToFile(const std::string& 
   return OK;
 }
 
-bool HttpDownloader::postJson(const std::string& url, const std::string& body, const DataCallback& onData,
-                              const std::string& bearerToken, int* outStatus) {
+bool HttpDownloader::postJson(const std::string& url, const char* body, const size_t bodyLen,
+                              const DataCallback& onData, const std::string& bearerToken, int* outStatus) {
   if (outStatus) *outStatus = 0;
   if (!onData) {
     LOG_ERR("HTTP", "postJson requires a data callback");
+    return false;
+  }
+  if (!body || bodyLen == 0) {
+    LOG_ERR("HTTP", "postJson requires a body");
     return false;
   }
 
@@ -362,7 +366,7 @@ bool HttpDownloader::postJson(const std::string& url, const std::string& body, c
   http.setFollowRedirects(0);
 
   bool stoppedByCallback = false;
-  const int status = http.sendRequest("POST", reinterpret_cast<const uint8_t*>(body.data()), body.size(),
+  const int status = http.sendRequest("POST", reinterpret_cast<const uint8_t*>(body), bodyLen,
                                       [&http, &onData, &stoppedByCallback](const uint8_t* data, const size_t len) {
                                         // Only a success body is the event stream the caller is parsing. An
                                         // error body is usually plain JSON, not SSE, so feeding it to an SSE
@@ -409,7 +413,7 @@ bool HttpDownloader::postJson(const std::string& url, const std::string& body, c
     esp_http_client_set_header(client, "Authorization", authorization.c_str());
   }
 
-  esp_err_t err = esp_http_client_open(client, static_cast<int>(body.size()));
+  esp_err_t err = esp_http_client_open(client, static_cast<int>(bodyLen));
   if (err != ESP_OK) {
     LOG_ERR("HTTP", "postJson open failed: %s", esp_err_to_name(err));
     esp_http_client_cleanup(client);
@@ -417,10 +421,10 @@ bool HttpDownloader::postJson(const std::string& url, const std::string& body, c
   }
 
   size_t written = 0;
-  while (written < body.size()) {
-    const int n = esp_http_client_write(client, body.data() + written, static_cast<int>(body.size() - written));
+  while (written < bodyLen) {
+    const int n = esp_http_client_write(client, body + written, static_cast<int>(bodyLen - written));
     if (n <= 0) {
-      LOG_ERR("HTTP", "postJson short write at %zu/%zu", written, body.size());
+      LOG_ERR("HTTP", "postJson short write at %zu/%zu", written, bodyLen);
       esp_http_client_cleanup(client);
       return false;
     }
@@ -443,6 +447,7 @@ bool HttpDownloader::postJson(const std::string& url, const std::string& body, c
     return false;
   }
 
+  bool stoppedByCallback = false;
   while (true) {
     const int read = esp_http_client_read(client, buf.get(), READ_CHUNK);
     if (read < 0) {
@@ -450,11 +455,24 @@ bool HttpDownloader::postJson(const std::string& url, const std::string& body, c
       esp_http_client_cleanup(client);
       return false;
     }
-    if (read == 0) break;  // stream finished
-    if (!onData(reinterpret_cast<const uint8_t*>(buf.get()), static_cast<size_t>(read))) break;
+    // A zero-length read means the socket gave us nothing more -- which is what
+    // both a finished stream and a connection dropped mid-reply look like from
+    // here. Only esp_http_client_is_complete_data_received() tells them apart,
+    // and the difference matters: a truncated reply reported as a whole one is
+    // shown to the reader as finished and written into the history that every
+    // later request replays.
+    if (read == 0) break;
+    if (!onData(reinterpret_cast<const uint8_t*>(buf.get()), static_cast<size_t>(read))) {
+      // A caller-initiated stop is the normal ending: the stream is read until
+      // the provider's sentinel, not until the socket closes.
+      stoppedByCallback = true;
+      break;
+    }
   }
 
+  const bool complete = stoppedByCallback || esp_http_client_is_complete_data_received(client);
+  if (!complete) LOG_ERR("HTTP", "postJson stream ended early");
   esp_http_client_cleanup(client);
-  return true;
+  return complete;
 #endif
 }

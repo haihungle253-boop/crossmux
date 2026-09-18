@@ -342,10 +342,23 @@ async def stream_openai(body: dict[str, Any], model: str, tap: ReplyTap | None =
                 return
             # The upstream already speaks the dialect the reader wants; relaying
             # bytes keeps this path free of reassembly bugs.
+            # Most OpenAI-compatible endpoints close with the sentinel, but it
+            # is not universal -- and the reader now uses it to tell a finished
+            # reply from a dropped connection, so a provider that omits it would
+            # have every reply marked incomplete and left out of the history.
+            # Watching a small tail catches it even when it lands across a chunk
+            # boundary.
+            saw_done = False
+            tail = b""
             async for raw in response.aiter_bytes():
                 if tap is not None:
                     tap.feed(raw)
+                if not saw_done:
+                    tail = (tail + raw)[-64:]
+                    saw_done = b"[DONE]" in tail
                 yield raw
+            if not saw_done:
+                yield b"data: [DONE]\n\n"
 
 
 async def stream_anthropic(body: dict[str, Any], model: str, tap: ReplyTap | None = None) -> AsyncIterator[bytes]:

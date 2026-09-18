@@ -188,4 +188,59 @@ TEST(PromptBuilder, MaxTokensOmittedWhenUnset) {
   EXPECT_TRUE(contains(builder.body(), "\"max_tokens\":300"));
 }
 
+TEST(PromptBuilder, DropsOldestExchangesUntilTheRequestFits) {
+  // The section caps do not add up to a promise: a full persona, a full history
+  // and a full excerpt are each inside their own limit and together exceed any
+  // buffer sized from the caps alone. Before this was handled, a reader whose
+  // history had filled up got a failed build on every question for the rest of
+  // that book -- history only grows, so the failure never cleared.
+  const std::string cjk = [] {
+    std::string s;
+    while (s.size() < 3072) s += "中";
+    return s;
+  }();
+
+  std::vector<std::string> questions, replies;
+  std::vector<PromptBuilder::Exchange> history;
+  for (int i = 0; i < 10; ++i) {
+    questions.push_back(cjk.substr(0, 102));
+    replies.push_back(cjk.substr(0, 306));
+  }
+  for (int i = 0; i < 10; ++i) history.push_back({questions[i].c_str(), replies[i].c_str()});
+
+  std::array<char, 8192> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setModel("deepseek-chat");
+  builder.setPersona(cjk.substr(0, 1020).c_str());
+  builder.setPosition(samplePosition());
+  builder.setExcerpt(cjk.c_str());
+  builder.setHistory(history.data(), history.size());
+  builder.setQuestion("这一章你怎么看？");
+  builder.setMaxTokens(800);
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_GT(builder.droppedExchanges(), 0u);
+  // What it gives up is the far end of the conversation, never the question in
+  // front of it or the newest exchange the follow-up depends on.
+  EXPECT_TRUE(contains(builder.body(), "这一章你怎么看？"));
+  EXPECT_LT(builder.droppedExchanges(), history.size());
+}
+
+TEST(PromptBuilder, SucceedsWithNoHistoryWhenEvenOneExchangeWillNotFit) {
+  // The last pass carries no history at all. A reader who has just opened a
+  // book is in exactly that state, so this request must always be possible.
+  std::string huge(6000, 'x');
+  PromptBuilder::Exchange one{huge.c_str(), huge.c_str()};
+
+  std::array<char, 4096> buf{};
+  PromptBuilder builder(buf.data(), buf.size());
+  builder.setHistory(&one, 1);
+  builder.setQuestion("q");
+
+  ASSERT_TRUE(builder.build());
+  EXPECT_TRUE(parsesAsJson(builder.body(), builder.length()));
+  EXPECT_EQ(builder.droppedExchanges(), 1u);
+}
+
 }  // namespace
