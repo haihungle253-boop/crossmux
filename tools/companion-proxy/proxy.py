@@ -63,6 +63,12 @@ def load_config() -> dict[str, Any]:
         raise SystemExit("config.toml: provider.api_key is empty")
     if not provider.get("model"):
         raise SystemExit("config.toml: provider.model is empty")
+    # Optional allowlist of further models a caller may ask for by name. Left
+    # out, behaviour is exactly what it was: one fixed model, and whatever the
+    # caller sends is ignored.
+    extra = provider.get("models", [])
+    if not isinstance(extra, list) or any(not isinstance(m, str) or not m for m in extra):
+        raise SystemExit("config.toml: provider.models must be a list of model names")
     return config
 
 
@@ -78,6 +84,24 @@ MAX_BODY_BYTES = int(LIMITS.get("max_request_bytes", 64 * 1024))
 HISTORY_DIR = Path(CONFIG.get("history", {}).get("dir", Path(__file__).with_name("history")))
 HISTORY_TURNS = int(CONFIG.get("history", {}).get("turns", 20))
 HISTORY_DIR.mkdir(parents=True, exist_ok=True)
+
+# The models a caller is allowed to name. The configured default is always in
+# it; provider.models adds to it. An unlisted name falls back to the default
+# rather than being forwarded, so a leaked token cannot run up a bill on a
+# model the owner never chose -- which is why this is an allowlist and not a
+# pass-through.
+DEFAULT_MODEL: str = PROVIDER["model"]
+ALLOWED_MODELS: frozenset[str] = frozenset([DEFAULT_MODEL, *PROVIDER.get("models", [])])
+
+
+def pick_model(requested: Any) -> str:
+    """The caller's choice when it is allowlisted, the configured default otherwise."""
+    if isinstance(requested, str) and requested in ALLOWED_MODELS:
+        return requested
+    if isinstance(requested, str) and requested and requested != DEFAULT_MODEL:
+        log.warning("model %r not in provider.models; using %s", requested, DEFAULT_MODEL)
+    return DEFAULT_MODEL
+
 
 app = FastAPI(title="Reading companion proxy")
 
@@ -451,7 +475,14 @@ async def stream_anthropic(body: dict[str, Any], model: str, tap: ReplyTap | Non
 @app.get("/healthz")
 async def healthz() -> dict[str, Any]:
     """No auth: it reveals nothing and makes 'is it running' answerable."""
-    return {"ok": True, "provider": PROVIDER["kind"], "model": PROVIDER["model"]}
+    return {
+        "ok": True,
+        "provider": PROVIDER["kind"],
+        "model": DEFAULT_MODEL,
+        # What a caller may ask for by name; the reader's own config.txt can
+        # then pick one without the Pi being touched.
+        "models": sorted(ALLOWED_MODELS),
+    }
 
 
 @app.post("/v1/chat/completions")
@@ -470,7 +501,8 @@ async def chat_completions(
     if not isinstance(body.get("messages"), list):
         raise HTTPException(status_code=400, detail="messages must be a list")
 
-    model = PROVIDER["model"]
+    # Honour a model the reader named, but only if config.toml allowlisted it.
+    model = pick_model(body.get("model"))
     book = book_key(body["messages"])
     question = merge_history(body, book)
     remember_position(book, body["messages"])
@@ -621,10 +653,17 @@ async def phone_chat(
     messages.append({"role": "user", "content": question})
 
     body = {"messages": messages, "max_tokens": MAX_TOKENS}
-    log.info("phone asks about %s: %d recorded exchanges replayed", book, len(messages) // 2)
+    # The phone may name a model too, against the same allowlist.
+    model = pick_model(payload.get("model"))
+    log.info(
+        "phone asks about %s: %d recorded exchanges replayed -> %s",
+        book,
+        len(messages) // 2,
+        model,
+    )
 
     return StreamingResponse(
-        recorded_stream(body, PROVIDER["model"], book, question, "phone"),
+        recorded_stream(body, model, book, question, "phone"),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
