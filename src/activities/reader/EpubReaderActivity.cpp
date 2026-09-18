@@ -541,9 +541,36 @@ void EpubReaderActivity::openCompanionChat() {
   context.percent = clampPercent(static_cast<int>(epub->calculateProgress(currentSpineIndex, 0.0f) * 100.0f + 0.5f));
 
   if (section && section->currentPage >= 0 && section->currentPage < section->pageCount) {
-    if (const auto page = section->loadPage(section->currentPage)) {
-      context.excerpt = CompanionPageText::extract(*page, CompanionChatActivity::EXCERPT_BYTES);
+    // Walk back from the page on screen until the excerpt budget is full. One
+    // page used only about a third of it, which left the companion discussing a
+    // paragraph rather than a passage.
+    //
+    // Backwards is what keeps shared progress honest: every page collected is
+    // one the reader has already turned. The walk stops at the start of this
+    // section rather than reaching into the previous one -- crossing a chapter
+    // means loading another Section, and a chapter of context is the unit the
+    // conversation is about anyway.
+    //
+    // Pages are loaded one at a time and released before the next, so the cost
+    // here is disk reads, not a pile of Page objects on a heap that has little
+    // to spare.
+    constexpr int MAX_PAGES_BACK = 12;
+    std::string excerpt;
+    const int firstPage = std::max(0, section->currentPage - MAX_PAGES_BACK + 1);
+    for (int page = section->currentPage; page >= firstPage; --page) {
+      const auto loaded = section->loadPage(page);
+      if (!loaded) break;
+      std::string text = CompanionPageText::extract(*loaded, CompanionChatActivity::EXCERPT_BYTES);
+      if (text.empty()) continue;
+      if (excerpt.empty()) {
+        excerpt = std::move(text);
+        continue;
+      }
+      if (text.size() + 1 + excerpt.size() > CompanionChatActivity::EXCERPT_BYTES) break;
+      text.push_back('\n');
+      excerpt.insert(0, text);
     }
+    context.excerpt = std::move(excerpt);
   }
 
   startActivityForResultWith<CompanionChatActivity>(
