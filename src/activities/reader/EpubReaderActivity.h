@@ -178,6 +178,7 @@ class EpubReaderActivity final : public ReaderActivity {
   std::string moreRowValue(int row) const;
   void activateMoreRow(int row);
   void openDictionaryWordSelect();
+  void openCompanionChat();
   bool launchKOReaderSync();
 #ifdef ENABLE_CHINESE_VERSION
   bool launchWeReadSync();

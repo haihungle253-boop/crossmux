@@ -1,0 +1,9 @@
+# 真实配置含密钥和令牌，绝不入库
+config.toml
+
+# 本地运行产物
+.venv/
+__pycache__/
+*.log
+history/
+history-test/
