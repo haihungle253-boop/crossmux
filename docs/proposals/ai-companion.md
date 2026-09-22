@@ -540,6 +540,11 @@ be correct at once — a genuine end-to-end test of the idea.
 
 ## 13. Deferred: voice interaction
 
+> **Superseded by [voice-input.md](voice-input.md) (2026-09-22).** The hardware
+> research below still stands and is cited there. Reason 3 does not: it reasons
+> about an always-listening assistant, and the proposal on the table is
+> push-to-talk, whose power profile is a page turn rather than a call.
+
 Recorded so the decision can be revisited without repeating the research.
 
 **The hardware supports it.** In the Waveshare `ESP32-S3-ePaper-3.97` repository,
